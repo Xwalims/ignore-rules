@@ -10,6 +10,24 @@ zero dependencies.
   each verdict came out the way it did. No black boxes.
 - **Dependency-free.** Node's standard library only. Nothing to install, ever.
 
+<!-- hero -->
+
+[![CI](https://github.com/ignore-rules/actions/workflows/ci.yml/badge.svg)](https://github.com/ignore-rules/actions/workflows/ci.yml)
+![node 20+](https://img.shields.io/badge/node-20+-brightgreen)
+![MIT](https://img.shields.io/badge/license-MIT-blue.svg)
+![dependencies](https://img.shields.io/badge/dependencies-none-2f6f4f)
+
+## Contents
+
+- [Install](#install)
+- [CLI](#cli)
+  - [Linting](#linting)
+  - [Explaining a pattern](#explaining-a-pattern)
+  - [JSON output](#json-output)
+  - [The precedence rules](#the-precedence-rules)
+
+<!-- /hero -->
+
 ## Install
 
 ```
