@@ -1,0 +1,36 @@
+{
+  "name": "ignore-rules",
+  "version": "0.1.0",
+  "description": "A correct .gitignore pattern matcher and a linter for gitignore files, with zero dependencies.",
+  "type": "commonjs",
+  "main": "src/index.js",
+  "bin": {
+    "gitignore-lint": "bin/gitignore-lint.js"
+  },
+  "files": [
+    "bin/",
+    "src/",
+    "LICENSE",
+    "README.md"
+  ],
+  "scripts": {
+    "test": "node --test"
+  },
+  "keywords": [
+    "gitignore",
+    "ignore",
+    "glob",
+    "git",
+    "lint",
+    "linter",
+    "pattern",
+    "matcher",
+    "cli"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "license": "MIT",
+  "private": false,
+  "dependencies": {}
+}
