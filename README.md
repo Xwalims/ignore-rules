@@ -333,7 +333,7 @@ A compiled pattern exposes `source`, `stripped`, `negated`, `dirOnly`,
 node --test
 ```
 
-94 tests across pattern compilation, precedence resolution, lint diagnostics
+106 tests across pattern compilation, precedence resolution, lint diagnostics
 and end-to-end CLI runs.
 
 ## License
