@@ -41,6 +41,7 @@ Options:
       --explain <pattern>    resolve sample paths against a pattern and show
                              every rule considered, in order
       --no-color             disable ANSI colour
+      --color                force ANSI colour even when output is piped
       --strict               exit 1 on any diagnostic, not only errors
   -h, --help                 show this help
   -v, --version              show the version
