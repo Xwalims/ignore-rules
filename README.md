@@ -12,7 +12,7 @@ zero dependencies.
 
 <!-- hero -->
 
-[![CI](https://github.com/ignore-rules/actions/workflows/ci.yml/badge.svg)](https://github.com/ignore-rules/actions/workflows/ci.yml)
+[![CI](https://github.com/Xwalims/ignore-rules/actions/workflows/ci.yml/badge.svg)](https://github.com/Xwalims/ignore-rules/actions/workflows/ci.yml)
 ![node 20+](https://img.shields.io/badge/node-20+-brightgreen)
 ![MIT](https://img.shields.io/badge/license-MIT-blue.svg)
 ![dependencies](https://img.shields.io/badge/dependencies-none-2f6f4f)
@@ -30,14 +30,20 @@ zero dependencies.
 
 ## Install
 
-```
-npm install --global gitignore-lint
+This package is **not published to npm** — neither `ignore-rules` nor the command
+name `gitignore-lint` is registered, so `npm install --global gitignore-lint`
+fails. Run it from a checkout:
+
+```console
+$ git clone https://github.com/Xwalims/ignore-rules.git
+$ cd ignore-rules
+$ node bin/gitignore-lint.js .gitignore
 ```
 
-Or run it straight from a checkout:
+Or link it onto your `PATH`:
 
-```
-node bin/gitignore-lint.js .gitignore
+```console
+$ npm link          # provides the `gitignore-lint` command
 ```
 
 ## CLI
