@@ -65,3 +65,29 @@ test('the binary accepts both colour flags', () => {
     );
   }
 });
+
+test('the README quotes the real --help output verbatim', () => {
+  // The README embeds a copy of the usage block, and a copy is a second source
+  // of truth that drifts: `--color` was added to --help and left out of the
+  // README, which then advertised a flag set the tool no longer had.
+  //
+  // Compare only the fenced block that quotes the usage text. Comparing the
+  // whole README pulls in prose after the block, and `npm test` there reads as
+  // a flag the tool must accept.
+  const readme = fs.readFileSync(path.join(__dirname, '..', 'README.md'), 'utf8');
+  const fence = readme.slice(readme.indexOf('Usage: gitignore-lint'));
+  const block = fence.slice(0, fence.indexOf('```', fence.indexOf('\n')));
+  const helpOptions = help.slice(help.indexOf('Options:'), help.indexOf('Exit codes:'));
+  const flagsIn = (text) => new Set([...text.matchAll(/(?<![-\w])(--[a-z][a-z0-9-]*)/g)]
+    .map((m) => m[1]));
+  const quotedFlags = flagsIn(block);
+  const realFlags = flagsIn(helpOptions);
+
+  const missing = [...realFlags].filter((f) => !quotedFlags.has(f));
+  assert.deepEqual(missing, [],
+    `README usage block omits: ${missing.join(' ')}`);
+
+  const extra = [...quotedFlags].filter((f) => !realFlags.has(f));
+  assert.deepEqual(extra, [],
+    `README usage block invents: ${extra.join(' ')}`);
+});
