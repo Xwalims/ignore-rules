@@ -275,6 +275,7 @@ still descends into it and the negation takes effect.
 | `*` | `*.log` | any run of characters, **never** crossing `/` |
 | `**` | `a/**/b` | `a/b`, `a/x/b`, `a/x/y/b` |
 | `**` trailing | `a/**` | everything under `a`, not `a` itself |
+| `***` and longer | `***/b` | the same as `**/b` — any run of 2+ asterisks is a globstar |
 | `?` | `?.txt` | exactly one character, never `/` |
 | class | `[a-z]`, `[!abc]` | one character from / not in a set, never `/` |
 | anchor | `/build`, `a/b` | a `/` anywhere but the end anchors to the root |
@@ -298,6 +299,8 @@ Two rules that catch people out, and which this implementation follows:
   still never spans a separator; `a/*` does not match `a/b/c`.
 - A globstar only counts when it is bounded by slashes or string ends. `a**b`
   is **not** a globstar: git collapses it to `a*b`, which cannot cross a slash.
+  The run is measured whole, so `***` is a globstar rather than a globstar
+  followed by a stray star — `***/b` behaves exactly like `**/b`.
 
 ## Diagnostics
 
@@ -340,8 +343,10 @@ A compiled pattern exposes `source`, `stripped`, `negated`, `dirOnly`,
 node --test
 ```
 
-106 tests across pattern compilation, precedence resolution, lint diagnostics
-and end-to-end CLI runs.
+123 tests across pattern compilation, precedence resolution, lint diagnostics
+and end-to-end CLI runs. The precedence and syntax rules are checked against
+real `git check-ignore` (`test/git-differential.test.js`), so the table above is
+measured rather than asserted.
 
 ## License
 

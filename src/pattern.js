@@ -405,18 +405,27 @@ function parseBody(raw) {
     if (ch === STAR) {
       isGlob = true;
 
-      if (i + 1 < n && body[i + 1] === STAR) {
+      // Measure the WHOLE run of asterisks. Two asterisks only start a
+      // globstar when the run ENDS there; `***` is not `**` plus a stray `*`,
+      // and treating it that way both mis-classified the token and left the
+      // third asterisk to be read as a separate star. `a**b` is still a plain
+      // star (git collapses an unbounded run), which is why the bound is
+      // checked on the run's own end rather than on the two-char lookahead.
+      let run = 1;
+      while (i + run < n && body[i + run] === STAR) run++;
+
+      if (run >= 2) {
         // A globstar only counts when it is bounded by slashes or string ends;
         // otherwise git collapses the run into a single `*`.
         const before = i === 0 ? null : body[i - 1];
-        const after = i + 2 >= n ? null : body[i + 2];
+        const after = i + run >= n ? null : body[i + run];
         const bounded =
           (before === '/' || before === null) && (after === '/' || after === null);
 
         if (!bounded) {
           degradedGlobstarCount++;
           tokens.push(new Star());
-          i += 2;
+          i += run;
           continue;
         }
 
@@ -424,12 +433,12 @@ function parseBody(raw) {
         if (i === 0) leadGlobstar = true;
         if (after === null) trailingGlobstar = true;
         tokens.push(new Globstar(after === '/'));
-        i += after === '/' ? 3 : 2;
+        i += after === '/' ? run + 1 : run;
         continue;
       }
 
       tokens.push(new Star());
-      i++;
+      i += run;
       continue;
     }
 

@@ -164,6 +164,27 @@ const CASES = [
     rules: ['x[\\/]y'],
     paths: ['x/y', 'xy'],
   },
+  {
+    // A run of THREE asterisks is a globstar, exactly as two are. It used to
+    // be read as `**` plus a stray `*`, so `***/**` demanded a slash and
+    // ignored nothing at the top level, where git ignores everything.
+    name: 'three asterisks are a globstar, not a globstar and a star',
+    rules: ['***/**'],
+    paths: ['a.txt', 'd/b.txt', 'd/e/c.txt', 'x/a.txt'],
+  },
+  {
+    name: 'four asterisks are also a globstar',
+    rules: ['****/**'],
+    paths: ['a.txt', 'd/b.txt', 'd/e/c.txt'],
+  },
+  {
+    // The unbounded-run rule is unchanged and still holds: `a**b` does not
+    // cross a slash, because git collapses a run that is bounded by neither
+    // slash nor string end into a single `*`.
+    name: 'an unbounded asterisk run does not cross a slash',
+    rules: ['a**b', 'a***b'],
+    paths: ['axb', 'a/b', 'p/q/r'],
+  },
 ];
 
 for (const { name, rules, paths } of CASES) {
