@@ -44,11 +44,19 @@ function samplePaths(rule, limit = 24) {
 
   // Each token expands to a few candidate strings; the cartesian product is
   // capped so a pathological pattern cannot blow up the linter.
+  //
+  // A character class with no ranges cannot match any character, so it has no
+  // sample to offer and the whole pattern has none either. That is not a
+  // hypothetical: a class whose only member was the slash has exactly zero
+  // ranges, because no class ever matches a slash (see `excludeSlash`), and
+  // `x[/]y` is therefore a rule that matches nothing at all. Returning [] for
+  // it is also the only sound answer, since `covers` requires every sample of the
+  // inner rule to be matched by the outer one and there is nothing to check.
   const expand = {
     [Globstar.name]: () => ['', 'x/', 'x/y/'],
     [Star.name]: () => ['', 'a', 'abc'],
     [AnyChar.name]: () => ['a', 'z'],
-    [CharClass.name]: (t) => [t.ranges[0][0], t.ranges[0][1]],
+    [CharClass.name]: (t) => (t.ranges.length ? [t.ranges[0][0], t.ranges[0][1]] : []),
     [Literal.name]: (t) => [t.ch],
   };
 

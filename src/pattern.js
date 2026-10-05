@@ -9,7 +9,8 @@
  *   star             *.log            any run of characters, never crossing /
  *   globstar         a[STARSTAR]/b    zero or more directories
  *   any-char         ?.txt            exactly one character, never /
- *   class            [a-z], [!ab]     one character from / not in a set
+ *   class            [a-z], [!ab]     one character from / not in a set,
+ *                                   and never a / either -- see excludeSlash
  *   anchor           /build, a/b      a slash anywhere but the end anchors to root
  *   dir-only         build/           matches directories only
  *   negation         !build/keep.txt  re-includes a previously ignored path
@@ -38,16 +39,88 @@ const STAR = '*';
 /** Character source for `?`: one character that is not a slash. */
 const NON_SLASH = '[^/]';
 
+/** The slash itself. */
+const SLASH = '/';
+
+/**
+ * Remove the slash from a set of ranges, splitting any range that spans it.
+ *
+ * This is the one place a bracket class and the rest of the pattern have to
+ * agree. Everywhere else a wildcard that matches "any characters" is barred
+ * from crossing a slash -- `*` compiles to `[^/]*`, `?` to `[^/]`, a literal
+ * slash is emitted escaped -- and a class is supposed to be barred the same
+ * way. It was not: the class was emitted as `[a\/]` and `[--\/]`, i.e. with
+ * the slash EXPLICITLY INCLUDED, which is the exact opposite of every other
+ * token. Measured against `git check-ignore`, the real behaviour is that no
+ * character class ever matches a slash:
+ *
+ *     [x/a]y   on "xay" -> ignored     [x/a]y  on "x/y"  -> kept
+ *     [x/-]y   on "x-y" -> ignored     [x/-]y  on "x/y"  -> kept
+ *     [x!/]y   on "xay" -> ignored     [x!/]y  on "x/y"  -> kept
+ *
+ * The negated form needs no change here, for the same reason: "every class is
+ * barred from the slash" is the same statement as "a negated class excludes
+ * the slash", which `classToRegex` already spells by starting its set with `/`.
+ *
+ * A RANGE that straddles the slash is split rather than dropped, so its other
+ * members survive -- also measured, because the naive fixes disagree here:
+ *
+ *     [+-0]  (0x2B..0x30) -> matches + , - . 0 but never /     -> two ranges
+ *     [,-1]  (0x2C..0x31) -> matches , - . 0 1 but never /     -> two ranges
+ *     [+-/]  (0x2B..0x2F) -> matches + , - .                   -> one range
+ *     [/-0]  (0x2F..0x30) -> matches 0                         -> one range
+ *
+ * Dropping such a range outright would lose `0-9` in `[0-9/`-shaped classes and
+ * keeping it whole would reintroduce the slash, so it is split at 0x2F.
+ *
+ * @param {Array<[string, string]>} ranges
+ * @returns {Array<[string, string]>} ranges with the slash removed
+ */
+function excludeSlash(ranges) {
+  const slash = SLASH.charCodeAt(0);
+  const before = String.fromCharCode(slash - 1);
+  const after = String.fromCharCode(slash + 1);
+  const out = [];
+  for (const [lo, hi] of ranges) {
+    const loCode = lo.charCodeAt(0);
+    const hiCode = hi.charCodeAt(0);
+    if (loCode > hiCode) {
+      // A reversed range matches nothing at all, so there is nothing to keep.
+      continue;
+    }
+    if (hiCode < slash) {
+      out.push([lo, hi]);
+    } else if (loCode > slash) {
+      out.push([lo, hi]);
+    } else {
+      // The span contains the slash: keep what is on either side of it.
+      if (loCode < slash) out.push([lo, before]);
+      if (hiCode > slash) out.push([after, hi]);
+    }
+  }
+  return out;
+}
+
 /** Escape a character for literal use inside a RegExp. */
 function escapeRe(ch) {
   return ch.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
-/** A `[...]` character class, parsed into ranges so matching needs no RegExp. */
+/**
+ * A `[...]` character class, parsed into ranges so matching needs no RegExp.
+ *
+ * The ranges never contain the slash: see `excludeSlash`, which strips it while
+ * parsing. A class that held nothing but a slash therefore arrives here with an
+ * empty range list, and such a class matches NOTHING -- verified against git,
+ * which keeps `x[/]y` from matching `x[/]y`, `x[]y`, `x/]y` or anything else.
+ * Emitting an empty `[...]` is exactly that: JavaScript treats `[]` as a class
+ * with no members, so the RegExp matches no character at all and the pattern can
+ * never fire.
+ */
 class CharClass {
   constructor(negated, ranges) {
     this.negated = negated;
-    this.ranges = ranges;
+    this.ranges = excludeSlash(ranges);
   }
 
   test(ch) {
@@ -597,6 +670,7 @@ module.exports = {
   parseFile,
   stripTrailingSpaces,
   inspectRaw,
+  excludeSlash,
   _internal: {
     GLOBSTAR,
     CharClass,

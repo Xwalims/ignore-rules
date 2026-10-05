@@ -132,6 +132,38 @@ const CASES = [
     rules: ['\\#notes.txt'],
     paths: ['#notes.txt'],
   },
+  {
+    // A character class never matches a slash, even when the slash is written
+    // inside the class. `*` compiles to `[^/]*` and `?` to `[^/]`, so a class
+    // holding `/` was the one token that DID cross a slash -- it was emitted as
+    // `[a\/]`, explicitly including the character every other token excludes.
+    name: 'a slash inside a character class never matches a slash',
+    rules: ['x[/]y'],
+    paths: ['x/y', 'xy', 'xay', 'x/zy'],
+  },
+  {
+    name: 'a class with other members still matches them, just not the slash',
+    rules: ['x[a/]y'],
+    paths: ['xay', 'x/y', 'x//y'],
+  },
+  {
+    // A range whose span contains the slash keeps the members on either side of
+    // it. `-` is 0x2D and `.` is 0x2E, so `[--/]` covers `-`, `.` and `/` and
+    // must match the first two only.
+    name: 'a range spanning the slash is split around it',
+    rules: ['x[--/]y'],
+    paths: ['x-y', 'x.y', 'x/y'],
+  },
+  {
+    name: 'an in-class slash still anchors the pattern to the root',
+    rules: ['[a/]b'],
+    paths: ['ab', 'z/ab'],
+  },
+  {
+    name: 'an escaped slash inside a class is still just the slash',
+    rules: ['x[\\/]y'],
+    paths: ['x/y', 'xy'],
+  },
 ];
 
 for (const { name, rules, paths } of CASES) {

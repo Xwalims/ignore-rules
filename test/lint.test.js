@@ -158,6 +158,24 @@ test('an empty file and a comments-only file are both clean', () => {
   assert.deepEqual(lint('# just a comment\n\n# another\n'), []);
 });
 
+test('a class with no members does not crash the linter', () => {
+  // `x[/]y` is a rule that can never match anything: no character class ever
+  // matches a slash, so the class ends up with zero members. The shadow analysis
+  // samples paths by walking each token and taking the first range, which used
+  // to read `ranges[0][0]` on an empty list and throw
+  // `TypeError: Cannot read properties of undefined (reading '0')` -- a crash on
+  // a syntactically legal .gitignore line, reached from the CLI.
+  for (const text of ['x[/]y\n', 'x[/]y\nkeep.txt\n', '[/][/]c\n*.log\n', 'x[!/]y\n']) {
+    assert.doesNotThrow(() => lint(text), `lint threw on ${JSON.stringify(text)}`);
+  }
+  // It is still analysed, not silently skipped: the in-class slash anchors it.
+  const diags = lint('x[/]y\n');
+  assert.ok(
+    diags.some((d) => d.line === 1),
+    'a slash-bearing rule on line 1 still produces a diagnostic',
+  );
+});
+
 test('a realistic problematic file reports every code', () => {
   // The fixture deliberately avoids a bare `**` and avoids repeating a rule in
   // two equivalent forms, both of which would shadow other lines and drown out

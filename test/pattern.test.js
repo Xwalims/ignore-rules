@@ -3,7 +3,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 
-const { parsePattern, parseFile, stripTrailingSpaces } = require('../src/pattern.js');
+const { parsePattern, parseFile, stripTrailingSpaces, excludeSlash } = require('../src/pattern.js');
 
 /** Compile and match, failing loudly with both inputs on a mismatch. */
 function match(pattern, path, isDir = false) {
@@ -14,6 +14,34 @@ function match(pattern, path, isDir = false) {
   );
   return r.matches(path, isDir);
 }
+
+test('excludeSlash drops the slash and splits any range that spans it', () => {
+  // Every case below is measured against `git check-ignore`, not reasoned about.
+  const table = [
+    [[['-', '-']], [['-', '-']]], // no slash, untouched
+    [[['a', 'z']], [['a', 'z']]],
+    [[['/', '/']], []], // slash alone leaves nothing
+    [[['a', 'a'], ['/', '/']], [['a', 'a']]], // slash member dropped, others kept
+    // `--/` is 0x2D..0x2F: `-`, `.` and `/`. git matches `-` and `.`.
+    [[['-', '/']], [['-', '.']]],
+    // `+-0` is 0x2B..0x30: git matches `+`, `,`, `-`, `.` and `0`.
+    [[['+', '0']], [['+', '.'], ['0', '0']]],
+    // `,-1` is 0x2C..0x31: git matches `,`, `-`, `.`, `0` and `1`.
+    [[[',', '1']], [[',', '.'], ['0', '1']]],
+    // `/-0` is 0x2F..0x30: git matches `0` only.
+    [[['/','0']], [['0', '0']]],
+    // A reversed range matches nothing, so there is nothing to keep.
+    [[['z', 'a']], []],
+  ];
+
+  for (const [input, expected] of table) {
+    assert.deepEqual(
+      excludeSlash(input),
+      expected,
+      `excludeSlash(${JSON.stringify(input)}) should be ${JSON.stringify(expected)}`,
+    );
+  }
+});
 
 test('literal patterns match at any depth but not as a prefix of a longer name', () => {
   assert.equal(match('build', 'build'), true);

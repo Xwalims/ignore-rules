@@ -276,7 +276,7 @@ still descends into it and the negation takes effect.
 | `**` | `a/**/b` | `a/b`, `a/x/b`, `a/x/y/b` |
 | `**` trailing | `a/**` | everything under `a`, not `a` itself |
 | `?` | `?.txt` | exactly one character, never `/` |
-| class | `[a-z]`, `[!abc]` | one character from / not in a set |
+| class | `[a-z]`, `[!abc]` | one character from / not in a set, never `/` |
 | anchor | `/build`, `a/b` | a `/` anywhere but the end anchors to the root |
 | dir-only | `build/` | directories only |
 | negation | `!build/keep.txt` | re-includes a previously ignored path |
@@ -284,6 +284,12 @@ still descends into it and the negation takes effect.
 | escape | `\ `, `\#`, `\!` | backslash escapes the next character |
 
 Trailing spaces are stripped unless backslash-escaped, matching git.
+
+A `/` written inside a character class never matches a slash, just as `*` and `?`
+never cross one. `[a/b]` matches `a` and `b` but not `/`, a range that spans the
+slash keeps the members on either side of it (`[--/]` matches `-` and `.` but not
+`/`), and a class holding nothing else — `[a/b]` with the `b` removed, say —
+matches nothing at all. An in-class `/` still anchors the pattern to the root.
 
 Two rules that catch people out, and which this implementation follows:
 

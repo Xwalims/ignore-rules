@@ -260,6 +260,40 @@ test('table-driven: pattern, path, isDir, expected', () => {
   }
 });
 
+test('a character class never matches a slash', () => {
+  // Every other token is barred from crossing a slash: `*` compiles to `[^/]*`
+  // and `?` to `[^/]`. A bracket class holding `/` was the one exception -- it
+  // emitted `[a\/]`, explicitly INCLUDING the character everything else excludes,
+  // so `x[/]y` excluded `x/y`. Measured against `git check-ignore`; see
+  // test/git-differential.test.js.
+  const table = [
+    ['x[/]y', 'x/y', false, 'a class of nothing but the slash matches nothing at all'],
+    ['x[/]y', 'xy', false],
+    ['x[a/]y', 'xay', true, 'the other members still work'],
+    ['x[a/]y', 'x/y', false, 'but the slash still does not'],
+    ['x[a/]y', 'x//y', false],
+    // `[--/]` is the range 0x2D..0x2F, i.e. `-`, `.` and `/`.
+    ['x[--/]y', 'x-y', true, 'the range is split around the slash, not dropped'],
+    ['x[--/]y', 'x.y', true],
+    ['x[--/]y', 'x/y', false],
+    ['x[--/]y', 'x0y', false, 'and it does not grow past its endpoints'],
+    // An in-class slash still anchors the pattern to the root.
+    ['[a/]b', 'ab', true],
+    ['[a/]b', 'z/ab', false, 'anchored by the in-class slash, so not at depth'],
+    // The negated form excludes the slash too.
+    ['x[!/]y', 'xay', true],
+    ['x[!/]y', 'x/y', false],
+  ];
+
+  for (const [pattern, path, expected, why] of table) {
+    assert.equal(
+      matcherFor(pattern).ignore(path, false),
+      expected,
+      `${JSON.stringify(pattern)} vs ${JSON.stringify(path)}${why ? ` (${why})` : ''}`,
+    );
+  }
+});
+
 test('table-driven: full rule list, where negation and precedence apply', () => {
   const table = [
     // `keep.log` on its own is a plain exclusion; the `!keep.log` row is the
