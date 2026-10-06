@@ -337,7 +337,7 @@ so `*.log` followed by `**` is caught, but `**` followed by `*.log` is not.
 | `createMatcher(rules)` | build a matcher over an ordered rule list |
 | `lint(text)` | return diagnostics for `.gitignore` text |
 | `lintRules(rules)` | the same, over already-compiled rules |
-| `normalizePath(p)` | strip `./`, collapse slashes, drop a trailing slash |
+| `normalizePath(p)` | strip `./`, collapse slashes, drop a trailing slash (a `\` is a filename character, not a separator) |
 | `ancestorsOf(path)` | every parent directory, outermost first |
 | `run(argv, io)` | the CLI entry point, returns an exit code |
 

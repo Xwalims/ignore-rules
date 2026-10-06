@@ -266,6 +266,67 @@ const CASES = [
     rules: ['x[^]a]y'],
     paths: ['x]y', 'xay', 'xb]y'],
   },
+  // --------------------------------------------------------------------
+  // Backslash paths.
+  //
+  // On POSIX a backslash is an ordinary filename character: `a\b` and `a/b`
+  // are two different paths, and git compares them as such. normalizePath()
+  // used to rewrite every `\` in the tested path to `/`, which made every
+  // pattern mentioning a backslash unreachable and -- worse -- let a rule git
+  // never applies fire on a path it should not have.
+  //
+  //     rules `b/`  path `a\b/c`  git KEEPS   old matcher IGNORED (false positive)
+  //     rules `a\\b` path `a\b`    git IGNORES old matcher kept     (miss)
+  //
+  // The pattern side was already correct: `a\b` compiles to the literal `ab`
+  // (an escape of the next character) and `a\\b` to the single character
+  // `a\b`. Only the path side was wrong.
+  // --------------------------------------------------------------------
+  {
+    name: 'a backslash in a filename is not a path separator',
+    rules: ['b/'],
+    paths: ['a\\b/c', 'ab/c'],
+  },
+  {
+    name: 'a backslash is reachable as an escaped literal',
+    rules: ['a\\b'],
+    paths: ['a\\b', 'ab'],
+  },
+  {
+    name: 'an escaped backslash matches exactly one backslash',
+    rules: ['a\\\\b'],
+    paths: ['a\\b', 'a\\\\b', 'ab'],
+  },
+  {
+    name: 'a directory pattern does not leak across a backslash boundary',
+    rules: ['b/', 'a\\b/'],
+    paths: ['a\\b/c', 'ab/c'],
+  },
+  {
+    name: 'a glob still matches a name containing a backslash',
+    rules: ['*.log'],
+    paths: ['a\\b.log', 'ab.log'],
+  },
+  {
+    name: 'a globstar still descends through a backslash name',
+    rules: ['**'],
+    paths: ['a\\b/c'],
+  },
+  {
+    name: 'an anchored pattern anchors past a leading backslash',
+    rules: ['/a\\b'],
+    paths: ['a\\b', 'z/a\\b', 'a/b'],
+  },
+  {
+    name: 'a class never matches a backslash either',
+    rules: ['x[\\]y'],
+    paths: ['x\\y', 'x/y', 'xy'],
+  },
+  {
+    name: 'a leading dot slash is stripped without touching a backslash',
+    rules: ['a\\b'],
+    paths: ['./a\\b', './a/b'],
+  },
 ];
 
 for (const { name, rules, paths } of CASES) {

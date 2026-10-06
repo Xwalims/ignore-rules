@@ -20,6 +20,22 @@ test('normalizePath strips prefixes and collapses separators', () => {
   assert.equal(normalizePath(''), '');
 });
 
+// A backslash is a legal filename character on POSIX, so it must survive
+// normalisation untouched. It used to be rewritten to `/`, which conflated two
+// distinct paths and made every backslash pattern unreachable. The agreement
+// with git is pinned in git-differential.test.js; this is the unit-level
+// statement of the same contract.
+test('normalizePath never rewrites a backslash into a separator', () => {
+  assert.equal(normalizePath('a\\b'), 'a\\b');
+  assert.equal(normalizePath('a\\b/c'), 'a\\b/c');
+  assert.equal(normalizePath('a\\\\b'), 'a\\\\b');
+  assert.equal(normalizePath('./a\\b'), 'a\\b');
+  // A backslash directory is not a slash directory.
+  assert.notEqual(normalizePath('a\\b'), normalizePath('a/b'));
+  // The two are separate components, so the parent is not shared.
+  assert.deepEqual(ancestorsOf('a\\b/c'), ['a\\b']);
+});
+
 test('ancestorsOf lists every parent directory outermost first', () => {
   assert.deepEqual(ancestorsOf('a/b/c.txt'), ['a', 'a/b']);
   assert.deepEqual(ancestorsOf('a'), []);

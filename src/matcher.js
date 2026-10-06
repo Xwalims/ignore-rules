@@ -36,11 +36,31 @@
  * Normalise a repository-relative path: strip a leading `./` or `/`, collapse
  * repeated slashes, and drop a trailing slash.
  *
+ * A BACKSLASH IS NOT TOUCHED, and that is deliberate. This used to rewrite
+ * every `\` to `/` as a Windows-path convenience, which silently broke every
+ * pattern that mentions a backslash: on POSIX a backslash is an ordinary
+ * filename character, so `a\b` and `a/b` are two different paths and git
+ * compares them as such. The rewrite made the second unreachable.
+ *
+ * Measured with `git check-ignore`:
+ *
+ *     rules `a\\b`  path `a\b`     git IGNORES, this matcher said "kept"
+ *     rules `a\\b`  path `a\\b`    git IGNORES, this matcher said "kept"
+ *     rules `b/`   path `a\b/c`   git KEEPS, this matcher ignored it
+ *
+ * The third is the dangerous direction: a rule that git does not apply was
+ * applied, which is a false "ignored" on a path nobody asked git about.
+ *
+ * Nothing needs the convenience: a repository-relative git path is already
+ * `/`-separated (`git ls-files`, `git check-ignore` and `git status` all emit
+ * forward slashes on every platform), and Node's `fs` accepts `/` on Windows
+ * too. So callers already have a form that needs no rewriting.
+ *
  * @param {string} p
  * @returns {string}
  */
 function normalizePath(p) {
-  let s = String(p == null ? '' : p).replace(/\\/g, '/');
+  let s = String(p == null ? '' : p);
   while (s.startsWith('./')) s = s.slice(2);
   s = s.replace(/^\/+/, '');
   s = s.replace(/\/{2,}/g, '/');
