@@ -220,6 +220,26 @@ function findClassEnd(s, start) {
 /**
  * Parse the interior of a `[...]` class into `[lo, hi]` ranges.
  * Handles `a-z` spans and backslash-escaped endpoints.
+ *
+ * A REVERSED range (`9-0`, `z-a`, `b-a`) is not an error and not a whole-class
+ * rejection: git keeps the first endpoint as an ordinary member and carries on
+ * parsing after the second one. Measured with `git check-ignore`, probing every
+ * printable ASCII character in place of the class:
+ *
+ *     [9-0]    => {9}          not {9, -, 0}   and not nothing
+ *     [z-a]    => {z}
+ *     [b-a0]   => {0, b}       resumes after the high endpoint, so the trailing
+ *                                literal 0 survives as a member
+ *     [9-0-8]  => {-, 8, 9}    resumes at the `-`, which is then a literal
+ *     [a-\]]   => {a}
+ *
+ * Two things had to change for that. The old code only tested `hi >= lo` and,
+ * on failure, fell through to `ranges.push([lo, lo])` WITHOUT advancing the
+ * cursor -- so the `-` and the high endpoint were parsed again as ordinary
+ * members, giving {9, -, 0}. And a lone `-` member next to another range emits
+ * `[9-8]`, which is a reversed range in the emitted RegExp and makes
+ * `new RegExp` throw "Range out of order in character class" -- so a `.gitignore`
+ * line that git accepts took the whole linter down at parse time.
  */
 function parseRanges(clsBody) {
   const ranges = [];
@@ -242,6 +262,13 @@ function parseRanges(clsBody) {
         k += 1 + hiStep;
         continue;
       }
+      // Reversed: `lo` survives as a member and parsing resumes past `hi`. The
+      // cursor must move to the END of the rejected range, not stay where it
+      // was -- leaving it put re-reads both the dash and the high endpoint as
+      // fresh members, which is how {9} became {9, -, 0}.
+      ranges.push([lo, lo]);
+      k += 1 + hiStep;
+      continue;
     }
     ranges.push([lo, lo]);
   }
@@ -257,7 +284,24 @@ function readCharAt(s, i) {
 function classToRegex(cls) {
   // Inside a character class a slash still needs escaping, otherwise the
   // trailing `/]` of the emitted class would terminate the RegExp early.
-  const member = (ch) => (ch === '/' ? '\\/' : escapeRe(ch));
+  //
+  // A DASH needs escaping too, but only in one specific case. When a lone `-`
+  // member is adjacent to a real range the two merge into something the RegExp
+  // engine reads as a reversed range: {9}, {-}, {0, 8} emitted as `[9--0-8]` or
+  // `[9-0-8]`, and `new RegExp` throws "Range out of order in character class".
+  // That is reachable from ordinary gitignore text, because `[9-0]` parses to
+  // exactly {9} and `[9-0-8]` to {-, 8, 9} -- see parseRanges.
+  //
+  // Escaping it unconditionally is simpler than working out when the
+  // neighbour could bind it, and `\-` means the same character as `-` inside a
+  // class, so the escape is free. It is applied to a lone dash only: the dash
+  // BETWEEN the endpoints of a genuine range must stay unescaped or the range
+  // stops being a range.
+  const member = (ch) => {
+    if (ch === '/') return '\\/';
+    if (ch === '-') return '\\-';
+    return escapeRe(ch);
+  };
 
   if (cls.negated) {
     const excluded = [];

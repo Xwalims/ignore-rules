@@ -301,6 +301,14 @@ Two rules that catch people out, and which this implementation follows:
   is **not** a globstar: git collapses it to `a*b`, which cannot cross a slash.
   The run is measured whole, so `***` is a globstar rather than a globstar
   followed by a stray star — `***/b` behaves exactly like `**/b`.
+- A **reversed** range is not an error and does not void the class. git keeps
+  the first endpoint as an ordinary member and resumes parsing after the
+  second one: `[9-0]` matches `9` alone, `[b-a0]` matches `b` and `0`, and
+  `[9-0-8]` matches `9`, `-` and `8`. Every one of those was measured with
+  `git check-ignore` rather than assumed; see the differential suite.
+- A `]` immediately after `[` — or after a negation — is a literal member, not
+  the end of the class, so `[]]` matches `]` and `[]a]` matches both `]` and
+  `a`.
 
 ## Diagnostics
 

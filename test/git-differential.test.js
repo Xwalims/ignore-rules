@@ -185,6 +185,87 @@ const CASES = [
     rules: ['a**b', 'a***b'],
     paths: ['axb', 'a/b', 'p/q/r'],
   },
+
+  // --------------------------------------------------------------------
+  // Reversed character ranges.
+  //
+  // git does not treat `9-0` as an error, and it does not treat it as "the
+  // whole class matches nothing" either. It keeps the FIRST endpoint as an
+  // ordinary member and resumes parsing after the second one. Every
+  // expectation below was measured with `git check-ignore` by substituting
+  // each printable ASCII character into `x<ch>y`.
+  //
+  //     [9-0]   => {9}
+  //     [z-a]   => {z}
+  //     [b-a0]  => {b, 0}    resumes past the high endpoint
+  //     [9-0-8] => {9, -, 8}
+  //     [a-c-e] => {a, b, c, e}
+  //
+  // The old parser failed twice over. It never advanced its cursor past a
+  // rejected range, so the dash and the high endpoint were re-read as fresh
+  // members ({9, -, 0}); and a lone dash next to a real range emitted
+  // `[9-0]`, a reversed range in the RegExp, which made `new RegExp` THROW.
+  // A .gitignore line that git accepts therefore crashed the linter.
+  // --------------------------------------------------------------------
+  {
+    name: 'a reversed range keeps its first endpoint and drops the rest',
+    rules: ['x[9-0]y'],
+    paths: ['x9y', 'x0y', 'x-y', 'xy', 'xmy'],
+  },
+  {
+    name: 'a reversed range of letters behaves the same way',
+    rules: ['x[z-a]y'],
+    paths: ['xzy', 'xay', 'xmy', 'xby'],
+  },
+  {
+    name: 'parsing resumes after a reversed range, keeping what follows',
+    rules: ['x[b-a0]y'],
+    paths: ['xby', 'x0y', 'xay', 'xy'],
+  },
+  {
+    name: 'a reversed range followed by an ordered range',
+    rules: ['x[9-0-8]y'],
+    paths: ['x9y', 'x-y', 'x8y', 'xay'],
+  },
+  {
+    name: 'an ordered range followed by a reversed one',
+    rules: ['x[a-c-e]y'],
+    paths: ['xay', 'xby', 'xcy', 'xey', 'xdy'],
+  },
+  {
+    name: 'a reversed range whose low endpoint is not a digit',
+    rules: ['x[!-0]y'],
+    paths: ['x-y', 'x0y', 'xay'],
+  },
+  {
+    name: 'a reversed range with a bracket as its escaped high endpoint',
+    rules: ['x[a-\\]]y'],
+    paths: ['xay', 'x]y', 'x-y'],
+  },
+  {
+    // A bare dash as a class member is the shape that produced the invalid
+    // RegExp, so it is pinned on its own as well as in combination.
+    name: 'a dash used as a class member',
+    rules: ['x[-]y', 'x[-a]y', 'a[0-9-]'],
+    paths: ['x-y', 'xy', 'xay', 'xzy', 'a5', 'a-', 'ax', 'a'],
+  },
+  {
+    // git's own special case: a `]` immediately after `[` (or after the
+    // negation) is a literal member, not the end of the class.
+    name: 'a leading right bracket is a literal member',
+    rules: ['x[]a]y'],
+    paths: ['x]y', 'xay', 'x[]a]y', 'xa]y'],
+  },
+  {
+    name: 'a leading right bracket with nothing after it',
+    rules: ['x[]]y'],
+    paths: ['x]y', 'xay'],
+  },
+  {
+    name: 'a negated class with a leading right bracket matches nothing',
+    rules: ['x[^]a]y'],
+    paths: ['x]y', 'xay', 'xb]y'],
+  },
 ];
 
 for (const { name, rules, paths } of CASES) {

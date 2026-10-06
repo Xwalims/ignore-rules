@@ -30,7 +30,11 @@ test('excludeSlash drops the slash and splits any range that spans it', () => {
     [[[',', '1']], [[',', '.'], ['0', '1']]],
     // `/-0` is 0x2F..0x30: git matches `0` only.
     [[['/','0']], [['0', '0']]],
-    // A reversed range matches nothing, so there is nothing to keep.
+    // A reversed span cannot contain a slash in git's model either: `z` and
+    // `a` do not bracket `/`, so the span is dropped as an empty range. What
+    // survives is handled by parseRanges, not here -- this function only
+    // strips the slash, and a reversed span that never reaches it is already
+    // discarded by CharClass's own `lo > hi` check.
     [[['z', 'a']], []],
   ];
 
