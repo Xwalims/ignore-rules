@@ -351,7 +351,7 @@ A compiled pattern exposes `source`, `stripped`, `negated`, `dirOnly`,
 node --test
 ```
 
-144 tests across pattern compilation, precedence resolution, lint diagnostics
+155 tests across pattern compilation, precedence resolution, lint diagnostics
 and end-to-end CLI runs. The precedence and syntax rules are checked against
 real `git check-ignore` (`test/git-differential.test.js`), so the table above is
 measured rather than asserted.

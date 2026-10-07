@@ -173,12 +173,21 @@ function lintRules(rules) {
 
     // --- globstar where a star would do ----------------------------------
     if (rule.degradedGlobstarCount > 0) {
+      // Collapse ONLY the runs git actually collapsed. A blanket
+      // `.replace(/\*\*+/g, '*')` also caught the runs that work: on
+      // `x**/y**/z` only the second run degrades, but the fix rewrote both and
+      // offered `x*/y*/z`, which stops matching `x/a/y/z` -- a path git does
+      // ignore. A fixer that changes which files are ignored is worse than no
+      // fixer, so the spans come from the parser, not from a regex.
+      const spans = (rule.degradedGlobstarSpans || []).slice().sort((a, b) => b[0] - a[0]);
+      let collapsed = rule.stripped;
+      for (const [at, len] of spans) collapsed = collapsed.slice(0, at) + '*' + collapsed.slice(at + len);
       add(
         rule,
         'globstar-not-needed',
         'warning',
         `"${rule.stripped}" contains a globstar that is not between slashes, so git collapses it to a single "*"`,
-        rule.stripped.replace(/\*\*+/g, '*')
+        collapsed
       );
     } else if (rule.globstarOnly && rule.tokens.length === 1) {
       // A bare `**` matches everything; say so, since it usually is a mistake.

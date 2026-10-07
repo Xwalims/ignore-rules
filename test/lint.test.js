@@ -4,6 +4,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 
 const { lint, SEVERITIES } = require('../src/lint.js');
+const { parsePattern } = require('../src/pattern.js');
 
 /** The codes present in a lint result, sorted for stable comparison. */
 function codesOf(text) {
@@ -102,6 +103,38 @@ test('globstar-not-needed: a bare globstar excludes the whole tree', () => {
 test('globstar-not-needed: a well-formed multi-directory globstar is fine', () => {
   assert.ok(!codesOf('a/**/b\n').includes('globstar-not-needed'));
   assert.ok(!codesOf('a/**\n').includes('globstar-not-needed'));
+  // A globstar right after a literal prefix is well formed too, and it does
+  // real work: git ignores `q/a/b`, which `q*/b` never matches.
+  assert.ok(!codesOf('q**/b\n').includes('globstar-not-needed'));
+});
+
+test('globstar-not-needed: the fix collapses only the runs git collapsed', () => {
+  // `x**/y**/z` has one working globstar and one degraded run. The fix used to
+  // rewrite every `**` in the line, producing `x*/y*/z` -- which stops matching
+  // `x/a/y/z`, a path git does ignore. Offering a fix that changes which files
+  // are ignored is worse than offering none.
+  const d = assertCode('x**/y**/z\n', 'globstar-not-needed', 1, 'warning');
+  assert.equal(d.fix, 'x**/y*/z', 'the first run is a real globstar and must survive');
+
+  // Spans are reported against the ORIGINAL line, so leading syntax does not
+  // shift them.
+  assert.equal(assertCode('!a**b\n', 'globstar-not-needed', 1, 'warning').fix, '!a*b');
+  assert.equal(assertCode('/a**b\n', 'globstar-not-needed', 1, 'warning').fix, '/a*b');
+  assert.equal(assertCode('**/a**b\n', 'globstar-not-needed', 1, 'warning').fix, '**/a*b');
+
+  // Every fix must still be a pattern the matcher accepts, and must keep
+  // matching what the original matched.
+  for (const [rule, fix] of [
+    ['x**/y**/z', 'x**/y*/z'],
+    ['a**b', 'a*b'],
+    ['p/**/q**/r', 'p/**/q*/r'],
+  ]) {
+    const original = parsePattern(rule).regex;
+    const fixed = parsePattern(fix).regex;
+    for (const path of ['x/y/z', 'x/a/y/z', 'axb', 'p/q/r', 'p/x/q/r']) {
+      assert.equal(fixed.test(path), original.test(path), `${fix} vs ${path}`);
+    }
+  }
 });
 
 test('anchor-suspicious: an interior slash quietly anchors to the root', () => {

@@ -327,6 +327,67 @@ const CASES = [
     rules: ['a\\b'],
     paths: ['./a\\b', './a/b'],
   },
+  // --------------------------------------------------------------------
+  // A globstar that follows a literal prefix.
+  //
+  // git matches a pattern in two steps (dir.c): it strips the leading run of
+  // non-wildcard characters -- simple_length(), which stops at the first of
+  // `*`, `?`, `[` or `\` -- and hands the REMAINDER to wildmatch(3) alone. The
+  // globstar test inside wildmatch only asks whether the run is preceded by a
+  // slash or sits at the start of THAT remainder:
+  //
+  //     (prev_p - pattern < 2 || *(prev_p - 2) == '/')
+  //
+  // So `q**/b` is a globstar -- the `q` was stripped as a prefix before the run
+  // was examined -- while `*q**/b` is not, because there the run is preceded by
+  // `q` inside the remainder proper. Read as "bounded by slashes or string
+  // ends", the pattern said `q**/b` degraded to `q*/b`, and it lost `q/b`,
+  // `qb`, `q/a/b` and `q/a/c/b` -- every case git ignores.
+  //
+  // Paths within one case must be able to coexist in one repository, since
+  // this file asks git about them all at once: a file cannot also be a
+  // directory. That is why `q/a/b/c/d` is checked in its own case.
+  // --------------------------------------------------------------------
+  {
+    name: 'a globstar after a literal prefix still spans directories',
+    rules: ['q**/b'],
+    paths: ['qb', 'q/b', 'q/a/b', 'q/a/c/b', 'p/qb', 'p/q/a/b'],
+  },
+  {
+    name: 'a prefixed globstar descends more than one level',
+    rules: ['q**/b'],
+    paths: ['q/a/b/c/d', 'p/q/a/b/c/d'],
+  },
+  {
+    name: 'a prefixed globstar followed by more segments',
+    rules: ['q**/b/c'],
+    paths: ['q/b/c', 'q/a/b/c', 'q/a/x/b/c'],
+  },
+  {
+    name: 'two prefixed globstars each take their own optional depth',
+    rules: ['x**/y**/z'],
+    paths: ['xyz', 'x/y/z', 'x/a/y/z', 'xy/z', 'x/yz', 'x/a/b/y/c/z'],
+  },
+  {
+    name: 'an interior slash in the prefix does not spoil the globstar',
+    rules: ['a/b**/c'],
+    paths: ['a/bc', 'a/b/c', 'a/b/x/c', 'a/b/x/y/c'],
+  },
+  {
+    name: 'an escaped literal before the run also ends the prefix',
+    rules: ['a\\.x**/b'],
+    paths: ['a.xb', 'a.x/b', 'a.x/a/b'],
+  },
+  {
+    name: 'a star, question mark or class before the run stops the prefix',
+    rules: ['*q**/b', '?q**/b', '[q]**/b'],
+    paths: ['qb', 'p/qb', 'aqb', 'p/aqb'],
+  },
+  {
+    name: 'a run bounded by text on the right degrades whatever precedes it',
+    rules: ['q**b', 'ab**c'],
+    paths: ['qxb', 'q/ab', 'qx/b', 'abc', 'ab/c'],
+  },
 ];
 
 for (const { name, rules, paths } of CASES) {

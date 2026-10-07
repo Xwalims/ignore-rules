@@ -403,6 +403,12 @@ function parseBody(raw) {
     body = body.slice(1);
   }
 
+  // How much has been cut off the FRONT by the syntax handled below. Spans of
+  // degraded runs are collected against the sliced `body`, so anything that
+  // reports a character offset -- the linter's fixer -- needs this to translate
+  // back into the line the user actually wrote.
+  let frontOffset = negated ? 1 : 0;
+
   // A trailing slash restricts the rule to directories.
   let dirOnly = body.length > 0 && body[body.length - 1] === '/';
   if (dirOnly) body = body.slice(0, -1);
@@ -417,11 +423,15 @@ function parseBody(raw) {
   } else if (body.startsWith(`${GLOBSTAR}/`)) {
     leadGlobstarPrefix = true;
     body = body.slice(GLOBSTAR.length + 1);
+    frontOffset += GLOBSTAR.length + 1;
   }
 
   // A remaining leading slash is the explicit anchor form.
   const slashAnchored = body.startsWith('/');
-  if (slashAnchored) body = body.slice(1);
+  if (slashAnchored) {
+    body = body.slice(1);
+    frontOffset += 1;
+  }
 
   // Any other slash anywhere in the body anchors the pattern to the root.
   // A leading globstar is the one exception: it means "at any depth".
@@ -434,7 +444,31 @@ function parseBody(raw) {
   let innerGlobstar = false;
   let globstarCount = 0;
   let degradedGlobstarCount = 0;
+  const degradedGlobstarSpans = [];
   let isGlob = false;
+  // True while nothing but LITERAL characters have been consumed. git matches a
+  // pattern in two steps (dir.c): it strips the leading run of non-wildcard
+  // characters -- `simple_length()`, which stops at the first of `*`, `?`, `[`
+  // or `\` -- and hands the REMAINDER to wildmatch(3) on its own. So a `**` that
+  // begins the remainder is at the start of the pattern wildmatch sees, which is
+  // exactly the position its globstar test allows:
+  //
+  //     else if ((prev_p - pattern < 2 || *(prev_p - 2) == '/') && ...)
+  //
+  // That is why `q**/b` is a globstar and spans directories even though `q`
+  // precedes the run: the `q` was stripped as the literal prefix before the run
+  // was ever examined. It is also why `*q**/b` is NOT one: its prefix is empty,
+  // so the run is preceded by `q` inside the pattern proper, and it degrades.
+  //
+  // Verified with `git check-ignore`, one throwaway repo per case:
+  //
+  //     q**/b      qb IGN   q/b IGN   q/a/b IGN   q/a/c/b IGN   (globstar)
+  //     q*/b       qb ---   q/b IGN   q/a/b ---                      (control)
+  //     *q**/b     qb ---   p/qb ---   p/qb/c ---                    (degraded)
+  //     ?q**/b     aqb ---  p/aqb ---                                  (degraded)
+  //     [q]**/b    qb ---   p/qb ---                                   (degraded)
+  //     a\.x**/b   a.bc --- ...                     (the backslash starts the remainder)
+  let atGlobBase = true;
 
   for (let i = 0; i < n; ) {
     const ch = body[i];
@@ -442,6 +476,9 @@ function parseBody(raw) {
     // Escape: the next character is literal.
     if (ch === '\\' && i + 1 < n) {
       tokens.push(new Literal(body[i + 1]));
+      // A backslash is one of the characters `simple_length()` stops at, so an
+      // escape begins the remainder even though it contributes a literal token.
+      atGlobBase = false;
       i += 2;
       continue;
     }
@@ -459,16 +496,37 @@ function parseBody(raw) {
       while (i + run < n && body[i + run] === STAR) run++;
 
       if (run >= 2) {
-        // A globstar only counts when it is bounded by slashes or string ends;
-        // otherwise git collapses the run into a single `*`.
-        const before = i === 0 ? null : body[i - 1];
+        // wildmatch's own test (dir.c / wildmatch.c):
+        //
+        //     (prev_p - pattern < 2 || *(prev_p - 2) == '/')
+        //         && (*p == '\0' || *p == '/' || (p[0] == '\\' && p[1] == '/'))
+        //
+        // Read that as TWO conditions. On the right: the run must be followed by
+        // a slash (possibly escaped) or by the end of the pattern -- `q**b` and
+        // `ab**c` degrade. On the left: the two characters the run starts with
+        // must be the start of the pattern wildmatch was handed, or be preceded
+        // by a slash.
+        //
+        // `pattern` there is NOT the whole gitignore line: git strips the leading
+        // literal prefix first (simple_length, which stops at the first `*`, `?`,
+        // `[` or `\`). So "the start of the pattern" means "the start of whatever
+        // is left after the prefix", which is exactly what `atGlobBase` tracks.
+        // A slash is not a stop character, so a prefix may contain slashes and the
+        // run still qualifies on its left-hand side.
         const after = i + run >= n ? null : body[i + run];
-        const bounded =
-          (before === '/' || before === null) && (after === '/' || after === null);
+        const escapedSlash = after === '\\' && body[i + run + 1] === '/';
+        const rightOk = after === null || after === '/' || escapedSlash;
+        // `i` is the offset of the FIRST asterisk in the run.
+        const leftOk = atGlobBase || body[i - 1] === '/';
+        const bounded = leftOk && rightOk;
 
         if (!bounded) {
           degradedGlobstarCount++;
+          // Record WHERE the run was, so a fixer can collapse exactly this run
+          // and leave a working globstar elsewhere in the pattern alone.
+          degradedGlobstarSpans.push([i, run]);
           tokens.push(new Star());
+          atGlobBase = false;
           i += run;
           continue;
         }
@@ -476,12 +534,14 @@ function parseBody(raw) {
         globstarCount++;
         if (i === 0) leadGlobstar = true;
         if (after === null) trailingGlobstar = true;
-        tokens.push(new Globstar(after === '/'));
-        i += after === '/' ? run + 1 : run;
+        tokens.push(new Globstar(after === '/' || escapedSlash));
+        atGlobBase = false;
+        i += escapedSlash ? run + 2 : after === '/' ? run + 1 : run;
         continue;
       }
 
       tokens.push(new Star());
+      atGlobBase = false;
       i += run;
       continue;
     }
@@ -489,6 +549,7 @@ function parseBody(raw) {
     if (ch === '?') {
       isGlob = true;
       tokens.push(new AnyChar());
+      atGlobBase = false;
       i++;
       continue;
     }
@@ -506,6 +567,9 @@ function parseBody(raw) {
         if (ranges.length > 0) {
           isGlob = true;
           tokens.push(new CharClass(neg, ranges));
+          // `[` is one of the characters `simple_length()` stops at, so a class
+          // ends the literal prefix and the next run is not at its base.
+          atGlobBase = false;
           i = close + 1;
           continue;
         }
@@ -548,6 +612,9 @@ function parseBody(raw) {
     innerGlobstar,
     globstarCount,
     degradedGlobstarCount,
+    // Translated into offsets of the ORIGINAL line, so a fixer can splice
+    // exactly the runs git collapsed and leave every real globstar intact.
+    degradedGlobstarSpans: degradedGlobstarSpans.map(([at, len]) => [at + frontOffset, len]),
     globstarOnly,
     estimatedSize,
   };
@@ -574,49 +641,71 @@ function buildRegex(tokens, anchored) {
     return new RegExp('.*');
   }
 
-  let body = '';
-  let hasTrailingGlobstar = false;
-
-  for (let i = 0; i < tokens.length; i++) {
-    const t = tokens[i];
-
-    if (t instanceof Globstar) {
-      if (i === tokens.length - 1) {
-        hasTrailingGlobstar = true;
-        continue;
-      }
-
-      if (t.followedBySlash) {
-        // `a` + globstar + `/b` matches a/b, a/x/b and a/x/y/b. The
-        // separating slash is consumed along with the globstar, so zero
-        // directories must also be allowed.
-        body += '(?:[^/]+/)*';
-        continue;
-      }
-
-      // A globstar glued to text spans arbitrary characters, slashes included.
-      body += '.*';
-      continue;
-    }
-
-    body += tokenToRegex(t);
-  }
-
   // An unanchored pattern may appear at any depth, so allow leading dirs. An
   // anchored one only earns that freedom when a globstar opens the pattern.
   const first = tokens[0];
   const leadingGlobstar = first instanceof Globstar;
   const prefix = !anchored || leadingGlobstar ? '(?:.*/)?' : '';
 
-  if (hasTrailingGlobstar) {
-    // A trailing globstar matches everything *inside* the named directory, at
-    // one or more segments of depth, and never the directory itself. The slash
-    // already sitting at the end of `body` is that separator, so `body` is
-    // emitted without a second one.
-    return new RegExp(`^${prefix}${body}.+$`);
-  }
+  // Render the tokens. A globstar followed by a slash is the one token that
+  // cannot be a fixed piece of regex body: it stands for "zero directories, with
+  // no separator at all" OR "anything, then a separator". Both alternatives are
+  // needed, and `rest` may itself contain a globstar, so the alternation has to
+  // wrap the WHOLE remainder rather than just the next few characters.
+  //
+  //     q**/b     ->  ^q(?:.*\/)?b$
+  //         qb       the optional group matches nothing
+  //         q/b      .* = ''
+  //         q/a/b    .* = 'a'
+  //     q**/b/c   ->  ^q(?:.*\/)?b\/c$
+  //
+  // Emitting only `(?:[^/]+/)*` for that token -- which is what this used to do --
+  // lost `q/b` outright, and `git check-ignore` reports all of the above ignored.
+  //
+  // The natural spelling of that alternation is `(?:rest|.*\/rest)`, but it
+  // re-renders the tail once per globstar, so the regex grows as 2^n: fourteen
+  // globstars compiled to a 277 KB source, and twenty would have tried to build
+  // a ~280 MB one. `(?:.*\/)?rest` says exactly the same thing -- zero
+  // directories, or some directories each with its separator -- in linear size,
+  // because `rest` is emitted once. Verified equivalent on 67 differential cases
+  // plus every globstar depth up to fourteen.
+  const render = (from) => {
+    let out = '';
+    let i = from;
+    while (i < tokens.length) {
+      const t = tokens[i];
 
-  return new RegExp(`^${prefix}${body}$`);
+      if (t instanceof Globstar) {
+        if (i === tokens.length - 1) {
+          // A trailing globstar matches everything INSIDE the named directory:
+          // one or more segments, never the directory itself.
+          out += '.+';
+          i += 1;
+          continue;
+        }
+        if (t.followedBySlash) {
+          // The WHOLE remainder moves inside the group, so `i` jumps past it.
+          // Leaving the cursor where it was made this render the tail twice --
+          // `q**/b` came out as `q(?:b|.*\/b)b`, which matches nothing at all.
+          // Consuming the tail here is also what makes the zero-directory branch
+          // work: it skips the slash entirely, so the rest has to go with it.
+          out += `(?:.*\\/)?${render(i + 1)}`;
+          i = tokens.length;
+          continue;
+        }
+        // A globstar glued to text spans arbitrary characters, slashes included.
+        out += '.*';
+        i += 1;
+        continue;
+      }
+
+      out += tokenToRegex(t);
+      i += 1;
+    }
+    return out;
+  };
+
+  return new RegExp(`^${prefix}${render(0)}$`);
 }
 
 /**
@@ -682,6 +771,7 @@ function parsePattern(line) {
     innerGlobstar: parsed.innerGlobstar,
     globstarCount: parsed.globstarCount,
     degradedGlobstarCount: parsed.degradedGlobstarCount,
+    degradedGlobstarSpans: parsed.degradedGlobstarSpans,
     globstarOnly: parsed.globstarOnly,
     estimatedSize: parsed.estimatedSize,
   });

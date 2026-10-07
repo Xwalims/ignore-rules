@@ -133,6 +133,55 @@ test('a globstar glued to text degrades to a single star, as git does', () => {
   assert.equal(r.globstarCount, 0);
 });
 
+test('a globstar after a literal prefix is still a globstar', () => {
+  // git strips the leading literal run first (simple_length, stopping at the
+  // first `*`, `?`, `[` or `\`), then runs wildmatch on the remainder -- so the
+  // run in `q**/b` sits at the start of what wildmatch sees, which is the one
+  // position its globstar test allows.
+  assert.equal(parsePattern('q**/b').globstarCount, 1);
+  assert.equal(parsePattern('q**/b').degradedGlobstarCount, 0);
+
+  assert.equal(match('q**/b', 'qb'), true, 'zero directories, no separator');
+  assert.equal(match('q**/b', 'q/b'), true);
+  assert.equal(match('q**/b', 'q/a/b'), true);
+  assert.equal(match('q**/b', 'q/a/c/b'), true);
+  assert.equal(match('q**/b', 'p/qb'), false, 'a slash still anchors the pattern');
+  assert.equal(match('q**/b', 'q/a/b/c'), false, 'the tail is still fixed');
+
+  // Anything that ends the literal prefix puts the run back inside the
+  // remainder, where a preceding `q` spoils the globstar test.
+  assert.equal(parsePattern('*q**/b').globstarCount, 0);
+  assert.equal(parsePattern('?q**/b').globstarCount, 0);
+  assert.equal(parsePattern('[q]**/b').globstarCount, 0);
+
+  // An ESCAPE ends the prefix too, and here that changes the answer: git hands
+  // wildmatch `\.x**/b`, so the run is preceded by `x` rather than by nothing,
+  // and the test fails. Measured with `git check-ignore`, which keeps `a.x/b`
+  // (the collapsed `a\.x*b` star matching nothing) but drops `a.xxb`:
+  assert.equal(parsePattern('a\\.x**/b').globstarCount, 0);
+  assert.equal(parsePattern('a\\.x**/b').degradedGlobstarCount, 1);
+});
+
+test('the compiled regex grows linearly, not exponentially, with globstars', () => {
+  // Spelling "zero directories OR any directories" as `(?:rest|.*\/rest)` is
+  // the obvious reading, but it re-renders the tail at every globstar: the
+  // source grew as 2^n and fourteen of them compiled to 277 KB. `(?:.*\/)?rest`
+  // says the same thing in linear size. Checked on the doubling, so the old
+  // shape fails loudly instead of merely getting slower.
+  const size = (n) => {
+    const parts = [];
+    for (let i = 0; i < n; i++) parts.push(`d${i}`, '**');
+    parts.push('end');
+    return parsePattern(parts.join('/')).regex.source.length;
+  };
+  assert.ok(size(10) < 500, `10 globstars should stay small, got ${size(10)}`);
+  assert.ok(
+    size(14) - size(13) < 40,
+    `each extra globstar must add a bounded amount, got ${size(13)} -> ${size(14)}`,
+  );
+  assert.ok(size(20) < 1000, `20 globstars should stay small, got ${size(20)}`);
+});
+
 test('anchoring: a leading slash anchors to the root', () => {
   assert.equal(match('/build', 'build'), true);
   assert.equal(match('/build', 'a/build'), false, 'anchored, so no leading dirs');
