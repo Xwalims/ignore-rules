@@ -46,7 +46,23 @@ function gitSays(rules, paths) {
   run(['config', 'user.email', 'test@example.invalid']);
   run(['config', 'user.name', 'test']);
 
+  // A path that is the PARENT of another path in the same case has to exist as
+  // a directory, or the nested path cannot be created under it and git is never
+  // asked about a real tree. Materialising those as files was fine while every
+  // case listed only leaves -- `EEXIST` on `mkdir`, in other words, is what a
+  // case mixing `a` with `a/b` used to produce, which reads like a matcher
+  // failure and is not one.
+  const asDir = new Set();
   for (const p of paths) {
+    if (paths.some((q) => q !== p && q.startsWith(`${p}/`))) asDir.add(p);
+  }
+  // Directories first, so a file is never written over a directory name.
+  for (const p of asDir) {
+    fs.mkdirSync(path.join(dir, p), { recursive: true });
+    fs.writeFileSync(path.join(dir, p, '.keep'), 'x\n');
+  }
+  for (const p of paths) {
+    if (asDir.has(p)) continue;
     const full = path.join(dir, p);
     fs.mkdirSync(path.dirname(full), { recursive: true });
     fs.writeFileSync(full, 'x\n');
@@ -387,6 +403,155 @@ const CASES = [
     name: 'a run bounded by text on the right degrades whatever precedes it',
     rules: ['q**b', 'ab**c'],
     paths: ['qxb', 'q/ab', 'qx/b', 'abc', 'ab/c'],
+  },
+// --------------------------------------------------------------------
+  // A trailing globstar: component vs glued.
+  //
+  // A run that is its own path COMPONENT must expand to at least one segment,
+  // so `a/**` does not ignore the bare name `a`. A run GLUED to text has no
+  // such requirement and may expand to nothing, so `a**` DOES ignore `a`. The
+  // two were compiled the same way -- an unconditional `.+` -- so every glued
+  // run missed the one path it exists to cover.
+  //
+  // All of it measured with `git check-ignore`:
+  //
+  //     a/**   a/b     IGNORED   a     KEPT
+  //     a**    a       IGNORED   ab    IGNORED
+  //     a**/** a       IGNORED
+  // --------------------------------------------------------------------
+  {
+    name: 'a component trailing globstar does not match the directory itself',
+    rules: ['a/**'],
+    paths: ['a', 'a/x', 'a/x/y', 'ax'],
+  },
+  {
+    name: 'a glued trailing globstar matches the bare name too',
+    rules: ['a**'],
+    paths: ['a', 'ab', 'a/b', 'x/a', 'x/ab'],
+  },
+  {
+    name: 'a glued run after several literal characters behaves the same',
+    rules: ['ab**'],
+    paths: ['ab', 'ab/c', 'x/ab'],
+  },
+  {
+    name: 'an anchored glued run still fixes its head',
+    rules: ['x/a**'],
+    paths: ['x/a', 'x/ab', 'y/a'],
+  },
+  {
+    name: 'a glued run followed by a component run still matches the bare name',
+    rules: ['a**/**'],
+    paths: ['a', 'ab', 'a/b', 'a/x', 'a/b/c'],
+  },
+  // --------------------------------------------------------------------
+  // A repeated slash is dead.
+  //
+  // A path never contains `//`, so a rule demanding one matches nothing --
+  // except when a run swallows the first separator on the way past, which is
+  // what `/**//` did: stripping the dir-only slash left the body `/**/`, the
+  // globstar ate the leftover separator, and the lone remaining Globstar token
+  // compiled to "match everything". A rule that ignores nothing in git was
+  // reported as ignoring the entire tree.
+  // --------------------------------------------------------------------
+  {
+    name: 'a doubled trailing slash is dead, not a match-everything rule',
+    rules: ['/**//'],
+    paths: ['a', 'a/b', 'a/b/c'],
+  },
+  {
+    name: 'a doubled slash after a globstar is dead',
+    rules: ['a/**//', '**/**//'],
+    paths: ['a', 'a/b', 'a/b/c', 'ab'],
+  },
+  {
+    name: 'a doubled slash inside the pattern is dead',
+    rules: ['a//b', 'a//b/c', '/a//b', 'a//b//'],
+    paths: ['a', 'a/b', 'a/b/c', 'b', 'ab'],
+  },
+  {
+    name: 'an escaped slash plus a real one is still doubled',
+    rules: ['a\\//'],
+    paths: ['a', 'a/b'],
+  },
+  {
+    // Controls: these have no doubled slash and must keep working.
+    name: 'a single escaped slash is live, not dead',
+    rules: ['a\\/b'],
+    paths: ['a/b', 'ab'],
+  },
+  {
+    name: 'a single trailing slash is a dir-only rule, not a dead one',
+    rules: ['a/'],
+    paths: ['a/x', 'a/x/y', 'x/a/y'],
+  },
+  // --------------------------------------------------------------------
+  // A doubled slash that is NOT dead, because a glued run absorbs one of the
+  // two separators. The counter-case is the plain single-slash form, which must
+  // keep expanding: `a[STARSTAR]/[SLASH]b` keeps `a/x/b`, `a[STARSTAR]/b`
+  // ignores it.
+  //
+  // Measured with `git check-ignore`; `a**//` collapses to the directory `a`
+  // itself, which is why the probe has to test it as a directory -- the same
+  // path as a file is KEPT, and testing only one kind is what made an earlier
+  // probe report this shape as dead.
+  // --------------------------------------------------------------------
+  {
+    name: 'a glued run absorbs one separator of a doubled slash',
+    rules: ['a**//b'],
+    paths: ['a/b', 'a/b/c', 'a/x/b', 'ab', 'a/bb'],
+  },
+  {
+    name: 'a doubled slash still collapses the run to a single path',
+    rules: ['a**//b/c', 'a**//bc', 'a**//*', 'a**//**'],
+    paths: ['a/b/c', 'a/b/c/d', 'a/bc', 'a/b', 'a/x/b', 'ab'],
+  },
+  {
+    name: 'an anchored glued run absorbs the same way',
+    rules: ['x/a**//b'],
+    paths: ['x/a/b', 'x/a/b/c', 'x/a/x/b'],
+  },
+  // --------------------------------------------------------------------
+  // A run with nothing in front of it does NOT absorb. Pinning it to the empty
+  // string leaves the rule with no left-hand side, and the pattern shipped as a
+  // match-everything rule -- the exact failure `/**//` had.
+  // --------------------------------------------------------------------
+  {
+    name: 'a run with nothing in front of it is dead, not match-everything',
+    rules: ['***//', '****//', 'a*//'],
+    paths: ['a', 'a/b', 'a/b/c', 'b', 'ab'],
+  },
+  {
+    name: 'a longer run glued to text still absorbs',
+    rules: ['a***//b', 'a****//b'],
+    paths: ['a/b', 'a/b/c', 'a/x/b', 'ab'],
+  },
+
+  // --------------------------------------------------------------------
+  // An ESCAPED slash after a globstar. wildmatch accepts `\/` as the trailing
+  // slash of a globstar run, so the run IS a globstar -- but the branch that
+  // stands for zero directory levels only fires on a LITERAL slash, so at
+  // least one level is required. These were all wrong before:
+  //
+  //     [STARSTAR] then [SLASH] then b      bare `b`   IGNORED
+  //     [STARSTAR] then [ESC] then b        bare `b`   KEPT     <- the bug
+  //
+  // The bare name is the ONLY path that distinguishes the two, which is why it
+  // has to be in the probe list or the difference is invisible.
+  {
+    name: 'a leading globstar before an escaped slash still needs a directory level',
+    rules: ['**\\/b'],
+    paths: ['b', 'a/b', 'x/b', 'a/x/b', 'b/c'],
+  },
+  {
+    name: 'a glued run before an escaped slash needs a directory level too',
+    rules: ['a**\\/b', 'q**\\/b', 'a**\\/a/b'],
+    paths: ['a/b', 'a/x/b', 'a/a/b', 'a/x', 'ab'],
+  },
+  {
+    name: 'an escaped slash where a doubled one would have been absorbed is dead',
+    rules: ['a**\\//b', 'a**\\//', 'a**\\/\\/b', '**\\//b', 'a**/\\'],
+    paths: ['a', 'ab', 'a/b', 'a/b/c', 'b', 'b/c'],
   },
 ];
 

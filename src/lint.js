@@ -138,8 +138,21 @@ function lintRules(rules) {
 
     if (rule.isComment || rule.isEmpty) continue;
 
-    // --- a rule with no matching power at all ----------------------------
-    if (rule.isEmpty) continue;
+    // --- a rule that can only match a doubled slash -----------------------
+    // No path contains `//`, so the rule never fires. git agrees: `/**//`,
+    // `a//b` and `a\//` all ignore nothing. Silence here is what let a rule that
+    // git applies to zero paths look identical to a working one, and before the
+    // matcher was fixed `/**//` was not merely useless but reported as
+    // excluding the whole repository.
+    if (rule.isDead) {
+      add(
+        rule,
+        'never-matches',
+        'error',
+        'this rule requires a doubled "/", which no path can contain, so it never matches anything',
+        'remove the duplicated separator'
+      );
+    }
 
     // --- negation with nothing to negate ---------------------------------
     const prior = active.slice(0, active.indexOf(rule)).filter((r) => !r.negated);

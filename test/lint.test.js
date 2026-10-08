@@ -47,6 +47,29 @@ test('never-matches: not reported when a positive rule does precede it', () => {
   assert.ok(!codesOf('build/\n!build/keep.txt\n').includes('never-matches'));
 });
 
+test('never-matches: a rule that requires a doubled slash', () => {
+  // No path contains `//`, so these rules apply to nothing. git agrees on
+  // every shape -- measured with `git check-ignore`, all KEEP every path asked
+  // about: `a//`, `a///`, `a/b//`, `*//`, `**//`, `/**//`, `a/**//`, `**/**//`,
+  // `//`, `///`, `a//b`, `a//b/c`, `/a//b`, `a\//`.
+  for (const rule of ['a//', '/**//', 'a/**//', 'a//b', '/a//b', 'a\\//']) {
+    const d = assertCode(`${rule}\n`, 'never-matches', 1, 'error');
+    assert.match(d.message, /doubled/);
+    assert.ok(d.fix, `offers a fix for ${rule}`);
+  }
+});
+
+test('never-matches: a single slash is not a doubled one', () => {
+  // The diagnostic must not fire on ordinary dir-only or escaped-slash rules,
+  // which are exactly the shapes it could have been confused with.
+  for (const rule of ['a/', 'a\\/b', 'a/b/', '**/', 'build/']) {
+    assert.ok(
+      !codesOf(`${rule}\n`).includes('never-matches'),
+      `${rule} is a live rule and must not be reported`,
+    );
+  }
+});
+
 test('duplicate-rule: the same rule twice', () => {
   const d = assertCode('*.log\n*.log\n', 'duplicate-rule', 2, 'warning');
   assert.match(d.message, /line 1/);

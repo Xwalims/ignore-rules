@@ -42,6 +42,9 @@ const NON_SLASH = '[^/]';
 /** The slash itself. */
 const SLASH = '/';
 
+/** The same slash, escaped for use inside a RegExp. */
+const SLASH_RE = '\\/';
+
 /**
  * Remove the slash from a set of ranges, splitting any range that spans it.
  *
@@ -148,8 +151,15 @@ class CharClass {
 
 /** A globstar: any sequence of characters, slashes included. */
 class Globstar {
-  constructor(followedBySlash) {
+  constructor(followedBySlash, escapedSlash) {
     this.followedBySlash = Boolean(followedBySlash);
+    // Set when the slash that follows this run is an ESCAPED one. The run still
+    // spans directory levels, but the separator becomes MANDATORY. See
+    // buildRegex.
+    this.escapedSlash = Boolean(escapedSlash);
+    // Set when this run absorbs one of the two separators of a doubled pair,
+    // which pins its expansion to the empty string. See parsePattern.
+    this.absorbsSlash = false;
   }
 
   get size() {
@@ -534,7 +544,7 @@ function parseBody(raw) {
         globstarCount++;
         if (i === 0) leadGlobstar = true;
         if (after === null) trailingGlobstar = true;
-        tokens.push(new Globstar(after === '/' || escapedSlash));
+        tokens.push(new Globstar(after === '/' || escapedSlash, escapedSlash));
         atGlobBase = false;
         i += escapedSlash ? run + 2 : after === '/' ? run + 1 : run;
         continue;
@@ -676,10 +686,73 @@ function buildRegex(tokens, anchored) {
       const t = tokens[i];
 
       if (t instanceof Globstar) {
+        // A run marked `absorbsSlash` has already eaten one of the two
+        // separators of a doubled pair, so it cannot expand to anything at
+        // all: whatever it matched would have to be inserted between two
+        // adjacent separators, and no path has those. This is checked BEFORE
+        // the trailing-run and run-followed-by-slash branches, because it
+        // overrides both -- a run can be both absorbing and last.
+        //
+        // Measured against `git check-ignore`, where the run marks the shape
+        // that absorbs and the plain run is the control:
+        //
+        //     a[STARSTAR]/[SLASH]b       ignores a/b, a/b/c      keeps a/x/b
+        //     a[STARSTAR]/b              ignores a/b, a/x/b
+        //     a[STARSTAR]/[SLASH]        ignores a (a directory)  keeps ab
+        //     ab[STARSTAR]/[SLASH]       ignores ab (a directory) keeps abc
+        //
+        // Emitting the usual "(?:.*\/)?" alternation here would have matched
+        // `a/x/b` as well, which git keeps.
+        if (t.absorbsSlash) {
+          if (i === tokens.length - 1) {
+            // Nothing follows, so the run and the separator it ate collapse
+            // away entirely and only the head is left: `a` matched exactly,
+            // which combined with the dir-only flag means "the directory a",
+            // the same thing plain `/a/` compiles to.
+            i += 1;
+            continue;
+          }
+          // The run and the single separator after it collapse to one.
+          // Anything beyond that renders as an ordinary token sequence -- and
+          // a run that is itself absorbing contributes nothing, which is what
+          // folds a whole chain of runs into a single separator.
+          out += SLASH_RE;
+          i += tokens[i + 1] instanceof Globstar ? 1 : 2;
+          continue;
+        }
         if (i === tokens.length - 1) {
-          // A trailing globstar matches everything INSIDE the named directory:
-          // one or more segments, never the directory itself.
-          out += '.+';
+          // A trailing globstar is normally everything INSIDE the named
+          // directory: one or more segments, never the directory itself.
+          //
+          // But that only holds when the run is its own path COMPONENT, i.e.
+          // when a slash comes immediately before it. Measured with
+          // `git check-ignore -v`, asking whether git ignores the path the
+          // run would collapse to:
+          //
+          //     a/**        a      git KEEPS    component run: needs one+
+          //     a/**/**     a      git KEEPS
+          //     a*/**       a, ax  git KEEPS
+          //     a\/b/**     a/b    git KEEPS
+          //     **/a/**     a, x/a git KEEPS
+          //
+          //     a**         a      git IGNORES  glued run: may be empty
+          //     ab**        ab     git IGNORES
+          //     x/a**       x/a    git IGNORES
+          //     a**/**      a      git IGNORES
+          //     a**/**/**   a      git IGNORES
+          //     a**/        a(dir) git IGNORES
+          //
+          // So `a**` ignores the bare name `a` -- the run is allowed to expand
+          // to nothing -- while `a/**` does not, because there the run stands
+          // for the contents of a directory that has to exist first. The test
+          // is exactly whether the preceding token is a literal slash.
+          //
+          // Emitting an unconditional `.+` therefore made every glued trailing
+          // run miss the one path it is supposed to cover: `a**` kept `a`, and
+          // with it `x/a`, `ab`/`a-z` and `a**/**`'s own directory.
+          const precededBySlash =
+            i > 0 && tokens[i - 1] instanceof Literal && tokens[i - 1].ch === SLASH;
+          out += precededBySlash ? '.+' : '.*';
           i += 1;
           continue;
         }
@@ -689,6 +762,35 @@ function buildRegex(tokens, anchored) {
           // `q**/b` came out as `q(?:b|.*\/b)b`, which matches nothing at all.
           // Consuming the tail here is also what makes the zero-directory branch
           // work: it skips the slash entirely, so the rest has to go with it.
+          //
+          // THE ESCAPED SLASH IS NOT OPTIONAL. This is the whole difference
+          // between the two spellings, and it was the source of a real bug.
+          // wildmatch's globstar test accepts `\/` as the trailing slash --
+          //
+          //     (*p == '\0' || *p == '/' || (p[0] == '\\' && p[1] == '/'))
+          //
+          // -- but the branch that stands for ZERO directory levels is entered
+          // only on a LITERAL slash. With `\/` the run falls through to the
+          // generic star handling, so it still spans slashes yet the separator
+          // is REQUIRED. Measured:
+          //
+          //     q then STARSTAR then slash then b     qb   KEEP
+          //     q then STARSTAR then ESC slash then b  qb   IGNORE
+          //
+          // Emitting the optional group for both made `**\/b` ignore the bare
+          // name `b`, which git keeps. Every disagreement in the escaped-slash
+          // family came from this one branch.
+          if (t.escapedSlash) {
+            // The tokenizer consumed the two characters of the escape, so there
+            // is no Literal('/') token to render: emit the separator here.
+            //
+            // `render(i + 1)` has already consumed the whole remainder, so the
+            // cursor has to jump to the end rather than step on by one. Stepping
+            // on re-renders the tail and produced `**\/b` as `.*\/bb`.
+            out += `.*\\/${render(i + 1)}`;
+            i = tokens.length;
+            continue;
+          }
           out += `(?:.*\\/)?${render(i + 1)}`;
           i = tokens.length;
           continue;
@@ -755,6 +857,181 @@ function parsePattern(line) {
 
   const parsed = parseBody(stripped);
 
+  // A REPEATED SLASH cannot occur in a path, so a rule that demands one matches
+  // nothing at all. This is measured on the stripped line, BEFORE parseBody
+  // removes the dir-only trailing slash -- otherwise the evidence is destroyed:
+  // `a//` becomes the body `a/`, and `/**//` becomes `**/`, whose globstar then
+  // swallows the leftover separator and leaves a lone Globstar token that
+  // compiles to /.*/ -- a rule git ignores NOTHING reported as ignoring the
+  // entire repository.
+  //
+  // But "a doubled slash is always dead" is WRONG, and the differential fuzzer
+  // is what proved it. A GLOBBAR RUN CAN ABSORB the first of the two
+  // separators, leaving an ordinary `/**` component run behind. Measured token
+  // stream against `git check-ignore`, where `L"/"` is a literal slash and `G/`
+  // is a globstar that already took a slash:
+  //
+  //     a**//      [L"a" G/]                 IGNORES a
+  //     ab**//     [L"a" L"b" G/]            IGNORES ab
+  //     x/a**//    [L"x" L"/" L"a" G/]      IGNORES x/a/b
+  //     a**//b     [L"a" G/ L"/" L"b"]      IGNORES a/b
+  //     a**//**    [L"a" G/ L"/" G]         IGNORES a/b
+  //
+  // Every live shape has the SAME shape: a run that is GLUED to what precedes
+  // it (no literal slash in front of it), whose absorbed slash is the first of
+  // the doubled pair, and with at most ONE literal segment left after it.
+  //
+  //     /**//      [G/]                      nothing   <- run not glued
+  //     a/**//     [L"a" L"/" G/]            nothing   <- run not glued
+  //     **/**//    [G/]                      nothing
+  //     a/**//b    [L"a" L"/" G/ L"/" L"b"]  nothing
+  //     /**///     [G/ L"/"]                 nothing
+  //     a**///     [L"a" G/ L"/"]            nothing   <- TWO slashes left
+  //     a**////    [L"a" G/ L"/" L"/"]       nothing
+  //     **/a**//   [L"a" G/]                 nothing   <- anchored differently
+  //     x//**//    [L"x" L"/" L"/" G/]      nothing   <- doubled slash first
+  //     a**//bc    [L"a" G/ L"/" L"b" L"c"]  nothing   <- two segments left
+  //     a**//b//   [L"a" G/ L"/" L"b" L"/"]  nothing
+  //
+  // Escapes are read through: `a\/b` is ONE literal slash and stays live,
+  // while `a\//` is a literal slash followed by a real one and is dead. The
+  // prefix group skips whole escape sequences so a trailing `\\` is consumed
+  // as a unit. The text rule cannot see an escaped PAIR (`a\/\/b` is two
+  // literal slashes with no adjacent characters in the source), so the token
+  // stream is checked as well.
+  //
+  // `**//` and `//` leave no tokens at all and are already reported as empty.
+  const doubledSlashText = /(?:\\.|[^\\])*?\/\//.test(stripped);
+  const doubledSlashTokens = parsed.tokens.some(
+    (t, k) =>
+      t instanceof Literal &&
+      t.ch === SLASH &&
+      parsed.tokens[k + 1] instanceof Literal &&
+      parsed.tokens[k + 1].ch === SLASH,
+  );
+  const hasDoubled = doubledSlashText || doubledSlashTokens;
+
+  // A doubled separator can still be LIVE, and the way it stays live is narrow:
+  // a globstar run GLUED to the text before it absorbs the first of the two
+  // separators, so only the second one has to match a real one. Measured with
+  // `git check-ignore`, listing what each pattern actually ignores:
+  //
+  //     a[STARSTAR]/[SLASH]        a (as a directory) and everything under it
+  //     a[STARSTAR]/[SLASH]b       a/b and everything under it
+  //     x/a[STARSTAR]/[SLASH]      x/a (as a directory) and everything under it
+  //
+  // The run cannot expand to anything in these forms: it has already eaten a
+  // separator, and a path never carries two in a row. That is why the absorbed
+  // run is rendered as NOTHING rather than as the usual "zero or more
+  // directories" alternation -- `a[STARSTAR]/[SLASH]b` ignores `a/b` but keeps
+  // `a/x/b`, which the alternation would have matched.
+  //
+  // Everything else is dead, and the discriminating cases are all measured:
+  //
+  //     a[STARSTAR]/b  a/x/b     kept  <- nothing absorbed, run may expand
+  //     a/[STARSTAR]/[SLASH]      dead  <- run is a component, not glued
+  //     /[STARSTAR]/[SLASH]       dead  <- the anchor slash is in front of it
+  //     [STARSTAR]/a[STARSTAR]/[SLASH]  dead  <- a leading globstar prefix puts
+  //                                             the run mid-pattern, and git
+  //                                             then has no place to hide the
+  //                                             extra separator
+  //     a[STARSTAR]/[SLASH][SLASH]  dead  <- a separator is left over at the END
+  //     a[STARSTAR]///[SLASH]       dead  <- likewise
+  //
+  // A leading `**/` prefix is the one case where a glued run still dies, and it
+  // is the reason `**/a**//` is dead while `a**//` is not. The prefix marks the
+  // run as sitting in the middle of the pattern, where the doubled separator
+  // has nothing left to absorb into.
+  //
+  // Escapes are read through: `a\/b` is ONE literal slash and stays live,
+  // while `a\//` is a literal slash followed by a real one and is dead. The
+  // prefix group skips whole escape sequences so a trailing `\\` is consumed
+  // as a unit. The text rule cannot see an escaped PAIR (`a\/\\/b` is two
+  // literal slashes with no adjacent characters in the source), so the token
+  // stream is checked as well.
+  //
+  // `**//` and `//` leave no tokens at all and are already reported as empty.
+  const tokens = parsed.tokens;
+
+  // Absorption is only ever consulted when there IS a doubled separator, so
+  // the search is gated on that. Without the gate an ordinary pattern whose
+  // first token is a slash-following run would be marked as absorbing and
+  // collapse to the empty string, losing the whole prefix.
+  //
+  // The qualifying run is the one the doubled separator belongs to: a run
+  // GLUED to text rather than sitting after a separator. A literal separator in
+  // front makes it a path COMPONENT instead, and it has nothing to absorb with
+  // -- that is what kills a doubled separator after a component run.
+
+  // The absorber is the LAST run glued to text, and only a literal SEGMENT
+  // after the doubled separator makes it absorb. Everything else undoes the
+  // collapse, which is why "fold the whole run chain" was wrong:
+  //
+  //     a[STARSTAR]/[SLASH]b                       a/b                  collapsed
+  //     a[STARSTAR]/[STARSTAR]/[SLASH]b            a/b                  collapsed
+  //     a[STARSTAR]/[STARSTAR]/[STARSTAR]/[SLASH]b  a/b                collapsed
+  //     a[STARSTAR]/[SLASH][STARSTAR]              a/b, a/x/b, a/x/y/b  expanded
+  //     a[STARSTAR]/[SLASH]                        a/ a/b a/x/y         live, dir-only
+  //     a[STARSTAR]/[STARSTAR]/[SLASH]             a/ a/b a/x/y         live, dir-only
+  //
+  // So a run sitting after the doubled separator takes the whole thing over and
+  // everything expands again. The trailing form is NOT dead either: git keeps it
+  // and it collapses to the head plus the dir-only separator -- the same thing
+  // plain `/a/` compiles to, and the same verdict set over every depth. A
+  // dedicated sweep of every path shape, file and directory, found it live in
+  // all of them, where an earlier probe had dropped `a/b` from its own list and
+  // concluded the opposite.
+  //
+  // When it DOES absorb, it is the last glued run in the pattern, and only that
+  // one collapses: earlier runs in the chain keep their own expansion, which is
+  // what `a[STARSTAR]/[STARSTAR]/[SLASH]b` collapsing to exactly `a/b` requires.
+  const lastGluedRun = tokens.reduce(
+    (acc, t, k) => (t instanceof Globstar && t.followedBySlash && !t.escapedSlash && k > 0 &&
+      !(tokens[k - 1] instanceof Literal && tokens[k - 1].ch === SLASH) ? k : acc),
+    -1,
+  );
+  const afterRun = lastGluedRun === -1 ? null : tokens[lastGluedRun + 1];
+  // The doubled separator is the one this run took. What has to follow it is a
+  // LITERAL segment; a run after it takes over, and the end of the pattern means
+  // the trailing form.
+  //
+  // The absorber may NOT be a run that ate an ESCAPED slash, which is what
+  // `!t.escapedSlash` above filters out. Absorption works by expanding the run to
+  // nothing and letting a single separator stand for the pair, but `\/` is
+  // already ONE literal character -- the backslash is gone before the run is
+  // even tokenised -- so there is no second character left to swallow and the
+  // run has nothing to collapse into. Measured, with the escaped bar in each
+  // position of the pair:
+  //
+  //     a[STARSTAR] slash   slash   b     a/b      live
+  //     a[STARSTAR] ESC     slash   b     nothing  dead
+  //     a[STARSTAR] slash   ESC     b     nothing  dead
+  //     a[STARSTAR] ESC     ESC     b     nothing  dead
+  //     a[STARSTAR] ESC     slash            nothing  dead
+  //
+  // Before the filter the escaped-first case compiled to `^a\/b$` and ignored
+  // `a/b`, a rule git applies to nothing at all.
+  const absorbs =
+    hasDoubled &&
+    lastGluedRun !== -1 &&
+    !parsed.leadGlobstarPrefix &&
+    !(afterRun instanceof Globstar) &&
+    afterRun instanceof Literal &&
+    afterRun.ch === SLASH;
+
+  if (absorbs) tokens[lastGluedRun].absorbsSlash = true;
+  // The trailing form collapses to the head alone, which with the dir-only flag
+  // means "the directory it names" -- exactly what plain `/a/` compiles to.
+  const absorbsTrailing =
+    hasDoubled &&
+    !absorbs &&
+    !parsed.leadGlobstarPrefix &&
+    lastGluedRun !== -1 &&
+    lastGluedRun === tokens.length - 1;
+
+  if (absorbsTrailing) tokens[lastGluedRun].absorbsSlash = true;
+  const doubledSlash = hasDoubled && !absorbs && !absorbsTrailing;
+
   Object.assign(compiled, {
     isComment: false,
     isEmpty: parsed.body === '' && parsed.tokens.length === 0,
@@ -774,11 +1051,20 @@ function parsePattern(line) {
     degradedGlobstarSpans: parsed.degradedGlobstarSpans,
     globstarOnly: parsed.globstarOnly,
     estimatedSize: parsed.estimatedSize,
+    doubledSlash,
   });
 
   // A lone `!`, `/` or `!/` carries no matching power at all.
   if (parsed.tokens.length === 0) {
     compiled.isEmpty = true;
+    return compiled;
+  }
+
+  // A rule that can only match a doubled slash can never match a path, and it
+  // must be reported as such rather than compiled into something broader.
+  if (doubledSlash) {
+    compiled.isDead = true;
+    compiled.regex = new RegExp('(?!)');
     return compiled;
   }
 
