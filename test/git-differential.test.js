@@ -553,6 +553,62 @@ const CASES = [
     rules: ['a**\\//b', 'a**\\//', 'a**\\/\\/b', '**\\//b', 'a**/\\'],
     paths: ['a', 'ab', 'a/b', 'a/b/c', 'b', 'b/c'],
   },
+  {
+    name: 'an escaped slash before an unterminated class still needs a directory level',
+    rules: ['**\\/b'],
+    paths: ['b', 'a/b', 'x/b', 'a/x/b', 'b/c'],
+  },
+  // --------------------------------------------------------------------
+  // Two shapes that make git drop the WHOLE rule, so it ignores nothing at
+  // all. Measured with `git check-ignore`, one candidate filename per rule:
+  //
+  //     [abc    nothing    a[bc    nothing    x*[bc   nothing
+  //     [abc]x  nothing    x/[abc  nothing    ![abc   nothing
+  //     a\[b    IGNORES `a[b`          <- an ESCAPED `[` is a literal
+  //
+  // The unterminated class used to be read as literal text, so `x[abc` fired on
+  // a file named `x[abc` -- one git keeps.
+  {
+    name: 'an unterminated character class is dead, not a literal',
+    rules: ['[abc', 'a[bc', 'x*[bc', 'x**[bc'],
+    paths: ['[abc', 'a[bc', 'x[bc', 'bc', 'x/bc', 'a'],
+  },
+  {
+    name: 'nothing rescues an unterminated class, not even text after it',
+    rules: ['[abc]x', 'x/[abc', '![abc', '[abc/'],
+    paths: ['[abc]x', 'x/[abc', '[abc', 'x/abc', '[abc/x', 'x'],
+  },
+  {
+    name: 'an escaped bracket is a literal, so the rule stays live',
+    rules: ['a\\[b', 'a\\[b]', 'a\\[b][cd]'],
+    paths: ['a[b', 'ab', 'a[b]', 'a[bc]'],
+  },
+  // --------------------------------------------------------------------
+  // A dangling escape at the end of a rule kills it in git too. The stray
+  // backslash is not a literal, so there is nothing left to fall back on.
+  {
+    name: 'a dangling trailing escape is dead, not a literal backslash',
+    rules: ['foo\\', 'foo\\ \\ ', 'a[b\\'],
+    paths: ['foo\\', 'foo', 'a[b\\', 'ab'],
+  },
+  {
+    name: 'an even backslash run still names a literal backslash',
+    rules: ['foo\\\\', 'foo\\\\\\ '],
+    paths: ['foo\\', 'foo', 'foo\\ '],
+  },
+  {
+    // The dir-only marker is stripped BEFORE the dangling-escape test, so the
+    // escaped slash is what remains in the body. Measured: `foo\/` ignores
+    // nothing -- not even the directory `foo` -- while `foo\\/` ignores `foo\`.
+    name: 'an escaped trailing slash leaves a dangling escape in the body',
+    rules: ['foo\\/', 'foo\\\\\\/', '**\\/'],
+    paths: ['foo', 'foo/x', 'foo\\', 'x/foo'],
+  },
+  {
+    name: 'a doubled backslash before the dir-only slash stays live',
+    rules: ['foo\\\\/'],
+    paths: ['foo\\', 'foo\\x', 'foo'],
+  },
 ];
 
 for (const { name, rules, paths } of CASES) {

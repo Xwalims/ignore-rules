@@ -93,8 +93,22 @@ test('character classes accept ranges and reject negated sets', () => {
   assert.equal(match('[a/b]', 'a/b'), false, 'a class is one character, not a path');
   assert.equal(match('x/[a-c]/y', 'x/b/y'), true);
   assert.equal(match('x/[a-c]/y', 'x/z/y'), false);
-  // An unterminated class degrades to a literal `[`.
-  assert.equal(match('[abc', '[abc'), true);
+  // An unterminated class does NOT degrade to a literal `[`: git drops the WHOLE
+  // rule. Measured with `git check-ignore`, which ignores nothing for any of
+  // these -- not `[abc`, not `a[bc`, not `x[abc`:
+  //
+  //     [abc    nothing     a[bc    nothing     x*[bc   nothing
+  //
+  // The old reading compiled the remainder as literal text, so `x[abc` fired on
+  // a file named `x[abc` -- one git keeps.
+  assert.equal(match('[abc', '[abc'), false, 'git drops an unterminated class');
+  assert.equal(match('a[bc', 'a[bc'), false);
+  assert.equal(parsePattern('[abc').isDead, true);
+  assert.equal(parsePattern('x*[bc').isDead, true);
+  assert.equal(parsePattern('[abc').deadReason, 'unterminated-class');
+  // The controls: an ESCAPED `[` is a literal, not an opening bracket.
+  assert.equal(match('a\\[b', 'a[b'), true);
+  assert.equal(parsePattern('a\\[b').isDead, undefined);
 });
 
 test('a globstar spans directories, including zero of them', () => {
@@ -400,6 +414,68 @@ test('an escaped trailing space is significant', () => {
   assert.equal(stripTrailingSpaces('trail\\ '), 'trail\\ ');
   assert.equal(match('trail\\ ', 'trail '), true);
   assert.equal(match('trail\\ ', 'trail'), false);
+});
+
+test('an escaped trailing space run collapses to a SINGLE space, as git does', () => {
+  // This is git's own trim_trailing_spaces(), not "an odd backslash count makes
+  // the whole run literal". Measured with `git check-ignore` on a file named
+  // after the resolved rule:
+  //
+  //     foo\        (2 spaces)  -> ignores `foo `    ONE space
+  //     foo\        (3 spaces)  -> ignores `foo `    ONE space
+  //     foo\        (4 spaces)  -> ignores `foo `    ONE space
+  //     foo\ \      (2 spaces)  -> ignores `foo  `   the whole run
+  //
+  // The old code returned the line untouched on an odd backslash count, so all
+  // three of the middle cases compiled to two, three and four literal spaces and
+  // matched nothing git would have matched.
+  for (const n of [2, 3, 4]) {
+    const rule = 'foo\\' + ' '.repeat(n);
+    assert.equal(match(rule, 'foo '), true, `${n} spaces -> one`);
+    assert.equal(match(rule, 'foo' + ' '.repeat(n)), false, `${n} spaces is not literal`);
+  }
+  assert.equal(match('foo\\ ' + '\\ ', 'foo  '), true, 'every escaped space survives');
+
+  // An unescaped run is stripped whole.
+  assert.equal(stripTrailingSpaces('build   '), 'build');
+  // A dangling escape aborts the scan: nothing is trimmed at all.
+  assert.equal(stripTrailingSpaces('foo\\'), 'foo\\');
+  assert.equal(stripTrailingSpaces('foo\\   '), 'foo\\ ');
+});
+
+test('a dangling escape kills the whole rule, as git does', () => {
+  // git rejects a pattern that ends mid-escape, rather than compiling the stray
+  // backslash as an ordinary literal. Measured with `git check-ignore`:
+  //
+  //     foo\      ignores nothing      foo\\     ignores the file `foo\`
+  //     foo\\\    ignores nothing      foo\\\\   ignores the file `foo\\`
+  //
+  // The old code read the stray backslash as a literal, so `foo\` fired on a file
+  // named `foo\` -- one git keeps.
+  for (const n of [1, 3, 5]) {
+    const rule = 'foo' + '\\'.repeat(n);
+    assert.equal(parsePattern(rule).isDead, true, `${n} backslashes is a dangling escape`);
+    assert.equal(match(rule, 'foo' + '\\'.repeat(n - 1)), false);
+  }
+  for (const n of [2, 4]) {
+    const rule = 'foo' + '\\'.repeat(n);
+    assert.equal(parsePattern(rule).isDead, undefined, `${n} backslashes is a literal`);
+    assert.equal(match(rule, 'foo' + '\\'.repeat(n / 2)), true);
+  }
+  assert.equal(parsePattern('foo\\').deadReason, 'dangling-escape');
+
+  // The dir-only marker is removed BEFORE this test, so a trailing escaped slash
+  // leaves a dangling escape in the body. Measured: `foo\/` ignores nothing --
+  // not even the directory foo -- while `foo\\/` still ignores the directory
+  // `foo\`. Testing the raw line instead of the body got all three of these
+  // backwards (`foo\/`, `foo\\\/`, `**\/`).
+  assert.equal(parsePattern('foo\\/').isDead, true);
+  assert.equal(parsePattern('foo\\\\/').isDead, undefined);
+  assert.equal(parsePattern('foo\\\\\\/').isDead, true);
+  assert.equal(parsePattern('**\\/').isDead, true);
+  assert.equal(parsePattern('**\\\\/').isDead, undefined);
+  // The live one still matches the directory it names.
+  assert.equal(match('foo\\\\/', 'foo\\', true), true);
 });
 
 test('backslash escapes the next character', () => {

@@ -144,14 +144,25 @@ function lintRules(rules) {
     // git applies to zero paths look identical to a working one, and before the
     // matcher was fixed `/**//` was not merely useless but reported as
     // excluding the whole repository.
+    // A rule can be inert for more than one reason, and the fix differs, so the
+    // message has to name the actual one. `deadReason` is set by parsePattern;
+    // anything without one is the doubled-slash case handled here.
     if (rule.isDead) {
-      add(
-        rule,
-        'never-matches',
-        'error',
+      const DEAD = {
+        'unterminated-class': [
+          'this rule has a "[" that is never closed, and git drops the whole rule, so it never matches anything',
+          'close the bracket, or escape it as "\\[" for a literal one',
+        ],
+        'dangling-escape': [
+          'this rule ends with a backslash that escapes nothing, and git drops the whole rule, so it never matches anything',
+          'remove the trailing backslash, or write "\\\\" for a literal one',
+        ],
+      };
+      const [why, fix] = DEAD[rule.deadReason] || [
         'this rule requires a doubled "/", which no path can contain, so it never matches anything',
-        'remove the duplicated separator'
-      );
+        'remove the duplicated separator',
+      ];
+      add(rule, 'never-matches', 'error', why, fix);
     }
 
     // --- negation with nothing to negate ---------------------------------

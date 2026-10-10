@@ -342,21 +342,123 @@ function tokenToRegex(token) {
 }
 
 /**
- * Strip unescaped trailing spaces. A trailing space run is literal only when it
- * is escaped by an *odd* number of immediately preceding backslashes, which is
- * exactly how git decides it.
+ * Strip unescaped trailing spaces.
+ *
+ * This is a transcription of git's own `trim_trailing_spaces()` (dir.c), not a
+ * "count the backslashes before the run" rule -- and the difference is visible.
+ * git remembers the FIRST space of the run it is walking through and cuts there
+ * if the run reaches the end of the line unescaped; a `\` consumes the next
+ * character as a unit and clears the mark. The consequences, all measured with
+ * `git check-ignore` against a file named after the resolved pattern:
+ *
+ *     foo\        (3 spaces)  -> matches `foo `   ONE space, not three
+ *     foo\        (4 spaces)  -> matches `foo `   ONE space
+ *     foo\ \      (2 spaces)  -> matches `foo  `  the whole run: each escaped
+ *     foo\  (no trailing escape)  -> matches `foo`    the run is stripped
+ *
+ * So an escaped run collapses to a SINGLE space unless every space in it is
+ * itself escaped. The old version returned the line untouched whenever the
+ * backslash count was odd, so `foo\   ` compiled to three literal spaces and
+ * matched a file `foo ` never matched -- and, worse, missed `foo ` too.
+ *
+ * The one case where a rule matches NOTHING at all is a dangling escape, and
+ * that is `trailingBackslashRunIsOdd` below, not a trimming question.
  */
 function stripTrailingSpaces(line) {
-  let end = line.length;
-  while (end > 0 && line[end - 1] === ' ') end--;
-  if (end === line.length) return line;
-  let i = end - 1;
-  let backslashes = 0;
-  while (i >= 0 && line[i] === '\\') {
-    backslashes++;
+  let lastSpace = -1;
+  let p = 0;
+  while (p < line.length) {
+    const c = line[p];
+    if (c === ' ') {
+      if (lastSpace === -1) lastSpace = p;
+    } else if (c === '\\') {
+      p++;
+      // A dangling escape aborts the scan and NOTHING is trimmed: git walks
+      // straight off the end of the buffer and keeps the whole line.
+      if (p >= line.length) return line;
+      lastSpace = -1;
+    } else {
+      lastSpace = -1;
+    }
+    p++;
+  }
+  return lastSpace === -1 ? line : line.slice(0, lastSpace);
+}
+
+/**
+ * True when the line ends in an ODD run of backslashes.
+ *
+ * git's `add_pattern` rejects such a rule outright (`is_null_terminated` is
+ * false, and a dangling escape leaves the pattern with nothing to escape), so
+ * the WHOLE rule is dropped rather than compiled. Measured with
+ * `git check-ignore`, one candidate filename per rule:
+ *
+ *     foo\      ignores nothing
+ *     foo\\     ignores the file named `foo\`
+ *     foo\\\    ignores nothing
+ *     foo\\\\   ignores the file named `foo\\`
+ *     foo\/     ignores nothing        (not even the directory foo)
+ *     foo\\/    ignores the dir foo\   (the escaped slash is a real slash)
+ *     foo\\/    ignores nothing
+ *
+ * An odd run anywhere at the end kills the rule; the run itself has no literal
+ * meaning, so there is nothing left to fall back on. The old code read the
+ * stray backslash as an ordinary literal, which made `foo\` fire on a file git
+ * keeps and -- in the `foo\/` case -- on the directory `foo` and everything
+ * under it.
+ */
+function trailingBackslashRunIsOdd(s) {
+  let i = s.length - 1;
+  let run = 0;
+  while (i >= 0 && s[i] === '\\') {
+    run++;
     i--;
   }
-  return backslashes % 2 === 1 ? line : line.slice(0, end);
+  return run % 2 === 1;
+}
+
+/**
+ * True when the pattern carries a `[` that is never closed.
+ *
+ * git's `parse_path_pattern` calls `parse_element`, which returns NULL on an
+ * unterminated class and makes the caller drop the whole pattern. Measured with
+ * `git check-ignore`:
+ *
+ *     [abc      ignores nothing
+ *     a[bc      ignores nothing   (a leading literal does not rescue it)
+ *     x*[bc     ignores nothing   (nor does a leading star)
+ *     x**[bc    ignores nothing   (nor a globstar)
+ *     [abc]x    ignores nothing   (text AFTER it does not rescue it either)
+ *     ![abc     ignores nothing   (negation does not rescue it)
+ *     x/[abc    ignores nothing
+ *     [abc/     ignores nothing   (the dir-only slash does not rescue it)
+ *     a\[\b     LIVE, matches `a[b`   an ESCAPED `[` is a literal, not a class
+ *     a\\[b     ignores nothing    a doubled backslash does not open a class
+ *
+ * So the escape scan has to be the outer loop: a `[` that is itself escaped is
+ * data, not syntax. `parseBody` already treats an escaped `[` as a literal, and
+ * `findClassEnd` already returns -1 for an unterminated one -- this is the same
+ * answer for the WHOLE RULE, which is what git does and what the token-level
+ * reading missed.
+ */
+function hasUnterminatedClass(s) {
+  let i = 0;
+  while (i < s.length) {
+    const c = s[i];
+    if (c === '\\') {
+      // An escape swallows the next character, so it cannot be an opening `[`.
+      i += 2;
+      continue;
+    }
+    if (c === '[') {
+      const close = findClassEnd(s, i); // its own scan reads through escapes
+      if (close === -1) return true;
+      i = close + 1;
+      continue;
+    }
+    i++;
+  }
+  return false;
 }
 
 /**
@@ -1065,6 +1167,42 @@ function parsePattern(line) {
   if (doubledSlash) {
     compiled.isDead = true;
     compiled.regex = new RegExp('(?!)');
+    return compiled;
+  }
+
+  // Two more shapes leave the WHOLE rule inert in git, and both used to compile
+  // into something that matched a file git keeps. Measured with
+  // `git check-ignore`, one file per candidate name:
+  //
+  //   [abc    -> ignores nothing
+  //   a[bc    -> ignores nothing     (a leading literal does not rescue it)
+  //   x[abc   -> ignores nothing     (nor does a leading literal)
+  //   x*[bc   -> ignores nothing
+  //   foo\    -> ignores nothing     (a dangling escape has nothing to escape)
+  //   foo\\   -> ignores the file named `foo\`
+  //   foo\\\  -> ignores nothing
+  //
+  // The class was read as literal text, so `x[abc` fired on a file named
+  // `x[abc`. The dangling escape was read as a literal trailing backslash, so
+  // `foo\` fired on a file named `foo\`. Both are the expensive direction: a
+  // linter that flags files git would have kept, or a rule that ignores what the
+  // author explicitly wanted ignored.
+  //
+  // Both tests run on the BODY, not on the raw line. git removes the negation
+  // marker, the dir-only trailing slash, a leading `**/` and a leading `/`
+  // before it parses anything, so `foo\/` leaves the body `foo\` -- a dangling
+  // escape -- and is dead, while `foo\\/` leaves `foo\\`, which is live. Testing
+  // the raw line instead marked three of the measured cases wrong:
+  //
+  //   foo\/      git: dead     raw-line test: live   body test: dead
+  //   foo\\\/    git: dead     raw-line test: live   body test: dead
+  //   **\/       git: dead     raw-line test: live   body test: dead
+  if (hasUnterminatedClass(parsed.body) || trailingBackslashRunIsOdd(parsed.body)) {
+    compiled.isDead = true;
+    compiled.regex = new RegExp('(?!)');
+    compiled.deadReason = hasUnterminatedClass(parsed.body)
+      ? 'unterminated-class'
+      : 'dangling-escape';
     return compiled;
   }
 

@@ -284,7 +284,10 @@ still descends into it and the negation takes effect.
 | comment | `# note` | ignored; `\#note` is not |
 | escape | `\ `, `\#`, `\!` | backslash escapes the next character |
 
-Trailing spaces are stripped unless backslash-escaped, matching git.
+Trailing spaces are stripped unless backslash-escaped, matching git. An escaped
+run collapses to a **single** space, though, which is the part that is easy to
+get wrong: `foo\   ` matches `foo `, not `foo   `. Only when every space in the
+run is itself escaped does the whole run survive (`foo\ \ ` matches `foo  `).
 
 A `/` written inside a character class never matches a slash, just as `*` and `?`
 never cross one. `[a/b]` matches `a` and `b` but not `/`, a range that spans the
@@ -299,7 +302,7 @@ Two rules that catch people out, and which this implementation follows:
   still never spans a separator; `a/*` does not match `a/b/c`.
 - A globstar only counts when it is bounded by slashes or string ends. `a**b`
   is **not** a globstar: git collapses it to `a*b`, which cannot cross a slash.
-  The run is measured whole, so `***` is a globstar rather than a globstar
+  The run is measured whole, so `***/b` is a globstar rather than a globstar
   followed by a stray star — `***/b` behaves exactly like `**/b`.
 - A **reversed** range is not an error and does not void the class. git keeps
   the first endpoint as an ordinary member and resumes parsing after the
@@ -309,6 +312,18 @@ Two rules that catch people out, and which this implementation follows:
 - A `]` immediately after `[` — or after a negation — is a literal member, not
   the end of the class, so `[]]` matches `]` and `[]a]` matches both `]` and
   `a`.
+- An **unterminated** `[` does not degrade to a literal one: git discards the
+  entire rule. `[abc`, `a[bc` and `x*[bc` all ignore nothing — neither the
+  brackets nor the literals around them. An **escaped** `\[` is different, it is
+  a literal bracket and the rule stays live: `a\[b` matches `a[b`.
+- A rule ending in a **dangling backslash** is discarded for the same reason.
+  `foo\` ignores nothing; `foo\\` matches the file named `foo\`. Note that the
+  dir-only slash is removed first, so `foo\/` is a dangling escape and ignores
+  nothing at all, while `foo\\/` is a live rule for the directory `foo\`.
+
+The matcher reports both inert shapes as `isDead` and the linter says which one
+it is, because the fix differs: close or escape the bracket, or drop or double
+the backslash.
 
 ## Diagnostics
 
@@ -351,7 +366,7 @@ A compiled pattern exposes `source`, `stripped`, `negated`, `dirOnly`,
 node --test
 ```
 
-179 tests across pattern compilation, precedence resolution, lint diagnostics
+189 tests across pattern compilation, precedence resolution, lint diagnostics
 and end-to-end CLI runs. The precedence and syntax rules are checked against
 real `git check-ignore` (`test/git-differential.test.js`), so the table above is
 measured rather than asserted.
